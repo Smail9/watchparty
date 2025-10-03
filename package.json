@@ -1,15 +1,13 @@
 {
   "name": "watchparty",
   "version": "1.0.0",
-  "description": "Watch Party Node.js + WebSocket + Express",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-"dependencies": {
-  "express": "^4.18.2",
-  "ws": "^8.12.0",
-  "http-proxy-middleware": "^3.0.0"
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.12.0",
+    "http-proxy-middleware": "^3.0.0"
+  }
 }
-}
-
