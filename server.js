@@ -7,16 +7,12 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* ---------- Contenu statique + healthcheck ---------- */
+/* ---------- Statique + healthcheck ---------- */
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
-app.get('/proxy', (req, res, next) => {
-  console.log('GET /proxy called with u=', req.query.u);
-  next(); // on laisse passer au vrai middleware juste après
-});
 
-/* ---------- Proxy fixe: /video-remote -> URL HTTP (évite le mixed content) ---------- */
-/* Modifie pathRewrite si tu veux une autre vidéo par défaut */
+/* ---------- Proxy fixe: /video-remote (HTTP -> via HTTPS) ---------- */
+/* Change seulement le chemin dans pathRewrite si tu veux une autre vidéo par défaut */
 app.use(
   '/video-remote',
   createProxyMiddleware({
@@ -31,11 +27,22 @@ app.use(
       proxyReq.setHeader('user-agent', 'Mozilla/5.0');
       proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
     },
+    onProxyRes: (proxyRes) => {
+      // Si le serveur source met octet-stream (ou rien), force un type vidéo
+      const ct = proxyRes.headers['content-type'] || '';
+      if (!ct || /octet-stream/i.test(ct)) {
+        proxyRes.headers['content-type'] = 'video/mp4';
+      }
+    }
   })
 );
 
-/* ---------- Proxy dynamique: /proxy?u=http://... ---------- */
-/* Permet de coller n'importe quel lien dans l'UI */
+/* ---------- Proxy dynamique: /proxy?u=<URL complète> ---------- */
+/* Permet d’utiliser n’importe quel lien HTTP/HTTPS dans l’UI */
+app.get('/proxy', (req, _res, next) => {              // petit log utile
+  console.log('GET /proxy called with u=', req.query.u);
+  next();
+});
 app.use('/proxy', (req, res, next) => {
   const raw = req.query.u;
   if (!raw) return res.status(400).send('Missing u');
@@ -45,16 +52,22 @@ app.use('/proxy', (req, res, next) => {
   catch { return res.status(400).send('Bad URL'); }
 
   return createProxyMiddleware({
-    target: u.origin,
+    target: u.origin,                  // ex: http://vipvodle.top:8080
     changeOrigin: true,
     secure: false,
     pathRewrite: () => u.pathname + u.search,
     onProxyReq: (proxyReq, req) => {
       const range = req.headers['range'];
-      if (range) proxyReq.setHeader('range', range);
+      if (range) proxyReq.setHeader('range', range);  // pour le seek
       proxyReq.setHeader('user-agent', 'Mozilla/5.0');
       proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
     },
+    onProxyRes: (proxyRes) => {
+      const ct = proxyRes.headers['content-type'] || '';
+      if (!ct || /octet-stream/i.test(ct)) {
+        proxyRes.headers['content-type'] = 'video/mp4';
+      }
+    }
   })(req, res, next);
 });
 
@@ -66,7 +79,7 @@ const server = app.listen(PORT, () => {
 /* ---------- WebSocket /watchparty ---------- */
 const wss = new WebSocketServer({ server, path: '/watchparty' });
 
-/** État par salle : lecture/temps/source */
+// État par salle : lecture/temps/source
 const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, updatedAt, src } }
 
 function getOrCreateRoom(roomId) {
@@ -126,14 +139,14 @@ wss.on('connection', (ws, req) => {
 
     if (msg.type === 'setSource') {
       applyAction(room, msg);
-      // Pour setSource, on notifie TOUT LE MONDE (y compris l'émetteur)
+      // on notifie TOUT LE MONDE (y compris l'émetteur) pour refléter la nouvelle source
       broadcast(room, msg, null);
       return;
     }
 
     if (['play','pause','seek'].includes(msg.type)) {
       applyAction(room, msg);
-      // Pour play/pause/seek: on exclut l'émetteur
+      // pour play/pause/seek on exclut l'émetteur
       broadcast(room, msg, ws);
     } else if (msg.type === 'syncRequest') {
       ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
@@ -147,4 +160,3 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
-
