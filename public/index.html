@@ -1,82 +1,60 @@
 <!doctype html>
-if (Math.abs(player.currentTime - t) > 0.4) {
-player.currentTime = t;
-// Attendre le seek pour être sûr
-await new Promise(r => setTimeout(r, 0));
-}
-}
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Watch Party</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}
+    .wrap{max-width:900px;margin:0 auto}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
+    video{width:100%;max-height:70vh;background:#000;border-radius:12px}
+    input,button{padding:8px 12px;border:1px solid #ccc;border-radius:10px}
+    button{cursor:pointer}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Watch Party</h1>
 
+    <div class="row">
+      <span>Salle :</span>
+      <input id="roomInput" type="text" placeholder="amis" />
+      <button id="joinBtn">Créer/Rejoindre</button>
+      <button id="copyBtn">Copier le lien d'invitation</button>
+    </div>
 
-async function applySync(state) {
-// Si la salle est en lecture, estime le temps écoulé depuis updatedAt
-let target = state.time;
-if (state.playing) {
-const drift = (Date.now() - state.updatedAt) / 1000; // ms -> s
-target += drift;
-}
-await setCurrentTime(target);
-if (state.playing && player.paused) {
-isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
-}
-if (!state.playing && !player.paused) {
-isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
-}
-}
+    <video id="player" controls preload="metadata">
+      <source src="sample.mp4" type="video/mp4" />
+    </video>
 
+    <div class="row">
+      <input type="file" id="filePicker" accept="video/*" />
+      <button id="syncBtn">Me recaler</button>
+    </div>
+  </div>
 
-// Écoute les actions locales et envoie au serveur
-player.addEventListener('play', () => {
-if (!ws || isRemoteUpdate) return;
-ws.send(JSON.stringify({ type: 'play', time: player.currentTime }));
-});
-player.addEventListener('pause', () => {
-if (!ws || isRemoteUpdate) return;
-ws.send(JSON.stringify({ type: 'pause', time: player.currentTime }));
-});
-player.addEventListener('seeking', () => {
-if (!ws) return;
-ws.send(JSON.stringify({ type: 'seek', time: player.currentTime }));
-});
+  <script>
+    const player = document.getElementById('player');
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const filePicker = document.getElementById('filePicker');
+    const syncBtn = document.getElementById('syncBtn');
 
+    const urlParams = new URLSearchParams(location.search);
+    const initialRoom = urlParams.get('room') || 'amis';
+    roomInput.value = initialRoom;
 
-joinBtn.addEventListener('click', () => {
-const room = (roomInput.value || 'amis').trim();
-const nextURL = new URL(location.href);
-nextURL.searchParams.set('room', room);
-history.replaceState(null, '', nextURL.toString());
-connect(room);
-});
+    let ws = null;
+    let isRemoteUpdate = false;
 
+    function wsURL(room) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
+    }
 
-copyBtn.addEventListener('click', async () => {
-const room = (roomInput.value || 'amis').trim();
-const link = new URL(location.href);
-link.searchParams.set('room', room);
-await navigator.clipboard.writeText(link.toString());
-copyBtn.textContent = 'Lien copié ✓';
-setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
-});
-
-
-syncBtn.addEventListener('click', () => {
-if (ws && ws.readyState === 1) {
-ws.send(JSON.stringify({ type: 'syncRequest' }));
-}
-});
-
-
-// Drag & drop / input fichier local pour tester vite
-filePicker.addEventListener('change', () => {
-const f = filePicker.files?.[0];
-if (f) {
-const url = URL.createObjectURL(f);
-player.src = url;
-}
-});
-
-
-// Auto-connexion à la salle de l'URL au chargement
-connect(initialRoom);
-</script>
-</body>
-</html>
+    function connect(room) {
+      if (ws) { try { ws.close(); } catch(_){} }
+      ws = new WebSocket(wsURL(room));
+      ws.onmessage = async (ev) => {
