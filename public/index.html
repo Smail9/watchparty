@@ -3,19 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Watch Party</title>
+  <title>Watch Party — Debug</title>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}
-    .wrap{max-width:900px;margin:0 auto}
-    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
-    video{width:100%;max-height:70vh;background:#000;border-radius:12px}
+    .wrap{max-width:980px;margin:0 auto}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+    video{width:100%;max-height:60vh;background:#000;border-radius:12px}
     input,button{padding:8px 12px;border:1px solid #ccc;border-radius:10px}
-    button{cursor:pointer}
+    .log{font-family:ui-monospace,Consolas,monospace;background:#f7f7f7;border:1px solid #ddd;border-radius:10px;padding:10px;max-height:200px;overflow:auto}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#eee}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Watch Party</h1>
+    <h1>Watch Party — Mode Debug</h1>
+
+    <div class="row">
+      <span class="badge">WS : <span id="wsStatus">—</span></span>
+      <span class="badge">Src : <span id="srcNow">—</span></span>
+    </div>
 
     <div class="row">
       <span>Salle :</span>
@@ -25,214 +31,229 @@
     </div>
 
     <div class="row">
-      <!-- Tu peux taper /video-remote ou /proxy?u=http://... -->
-      <input id="srcInput" type="url" placeholder="/video-remote OU /proxy?u=http://..." style="min-width:420px" />
+      <!-- Mets ici /video-remote ou /proxy?u=... (encodé ou pas) -->
+      <input id="srcInput" type="url" placeholder="/video-remote ou /proxy?u=http://..." style="min-width:520px" />
       <button id="setSrcBtn">Définir la vidéo pour tous</button>
+      <button id="testVideoRemote">Tester /video-remote</button>
+      <button id="testProxyEncoded">Tester /proxy (encodé)</button>
     </div>
 
-    <video id="player" controls preload="metadata">
-      <!-- Par défaut on met le proxy fixe -->
-      <source src="/video-remote" type="video/mp4" />
-    </video>
+    <video id="player" controls preload="metadata"></video>
 
     <div class="row">
       <input type="file" id="filePicker" accept="video/*" />
       <button id="syncBtn">Me recaler</button>
     </div>
+
+    <h3>Logs</h3>
+    <div id="log" class="log"></div>
   </div>
 
   <script>
-  const player = document.getElementById('player');
-  const roomInput = document.getElementById('roomInput');
-  const joinBtn = document.getElementById('joinBtn');
-  const copyBtn = document.getElementById('copyBtn');
-  const filePicker = document.getElementById('filePicker');
-  const syncBtn = document.getElementById('syncBtn');
-  const srcInput = document.getElementById('srcInput');
-  const setSrcBtn = document.getElementById('setSrcBtn');
+    const player = document.getElementById('player');
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const filePicker = document.getElementById('filePicker');
+    const syncBtn = document.getElementById('syncBtn');
+    const srcInput = document.getElementById('srcInput');
+    const setSrcBtn = document.getElementById('setSrcBtn');
+    const testVideoRemote = document.getElementById('testVideoRemote');
+    const testProxyEncoded = document.getElementById('testProxyEncoded');
+    const wsStatus = document.getElementById('wsStatus');
+    const srcNow = document.getElementById('srcNow');
+    const logDiv = document.getElementById('log');
 
-  const urlParams = new URLSearchParams(location.search);
-  const initialRoom = urlParams.get('room') || 'amis';
-  roomInput.value = initialRoom;
+    const urlParams = new URLSearchParams(location.search);
+    const initialRoom = urlParams.get('room') || 'amis';
+    roomInput.value = initialRoom;
 
-  let ws = null;
-  let isRemoteUpdate = false;
+    function log(...args){ const line = args.map(a => typeof a==='object'? JSON.stringify(a): String(a)).join(' ');
+      console.log(...args); logDiv.textContent += line + '\n'; logDiv.scrollTop = logDiv.scrollHeight; }
+    function setBadge(el, txt){ el.textContent = txt; }
+    function setSrcBadge(){ setBadge(srcNow, player.currentSrc || '(aucun)'); }
 
-  function wsURL(room) {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
-  }
+    let ws = null;
+    let isRemoteUpdate = false;
 
-  function connect(room) {
-    if (ws) { try { ws.close(); } catch(_){} }
-    ws = new WebSocket(wsURL(room));
+    function wsURL(room) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
+    }
 
-    ws.onopen  = () => console.log('WS open:', ws.url);
-    ws.onclose = () => console.log('WS closed');
-    ws.onerror = (e) => console.error('WS error', e);
+    function connect(room) {
+      if (ws) { try { ws.close(); } catch(_){} }
+      ws = new WebSocket(wsURL(room));
 
-    ws.onmessage = async (ev) => {
-      let msg; try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
+      setBadge(wsStatus, 'connexion…');
 
-      if (msg.type === 'syncState' && msg.state) {
-        await applySync(msg.state);
-      } else if (msg.type === 'play') {
-        await setCurrentTime(msg.time || 0);
+      ws.onopen  = () => { setBadge(wsStatus, 'connecté'); log('WS open:', ws.url); };
+      ws.onclose = () => { setBadge(wsStatus, 'fermé'); log('WS closed'); };
+      ws.onerror = (e) => { setBadge(wsStatus, 'erreur'); log('WS error', e); };
+
+      ws.onmessage = async (ev) => {
+        let msg; try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
+        log('WS message:', msg.type);
+
+        if (msg.type === 'syncState' && msg.state) {
+          await applySync(msg.state);
+        } else if (msg.type === 'play') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
+        } else if (msg.type === 'pause') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+        } else if (msg.type === 'seek') {
+          await setCurrentTime(msg.time || 0);
+        } else if (msg.type === 'setSource') {
+          if (msg.src) setPlayerSrc(msg.src);
+        }
+      };
+    }
+
+    async function setCurrentTime(t) {
+      if (Math.abs(player.currentTime - t) > 0.4) {
+        player.currentTime = t;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+
+    function setPlayerSrc(src) {
+      log('Setting player src to:', src);
+      const wasPlaying = !player.paused;
+      player.pause();
+      player.removeAttribute('src');   // flush
+      player.load();
+      player.src = src;
+      player.load();
+      setSrcBadge();
+      if (wasPlaying) player.play().catch(()=>{});
+    }
+
+    async function applySync(state) {
+      if (state.src && player.currentSrc !== state.src) {
+        setPlayerSrc(state.src);
+      }
+      let target = state.time;
+      if (state.playing) {
+        const drift = (Date.now() - state.updatedAt) / 1000;
+        target += drift;
+      }
+      await setCurrentTime(target);
+
+      if (state.playing && player.paused) {
         isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
-      } else if (msg.type === 'pause') {
-        await setCurrentTime(msg.time || 0);
+      }
+      if (!state.playing && !player.paused) {
         isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
-      } else if (msg.type === 'seek') {
-        await setCurrentTime(msg.time || 0);
-      } else if (msg.type === 'setSource') {
-        if (msg.src) setPlayerSrc(msg.src);
       }
-    };
-  }
-
-  async function setCurrentTime(t) {
-    if (Math.abs(player.currentTime - t) > 0.4) {
-      player.currentTime = t;
-      await new Promise(r => setTimeout(r, 0));
     }
-  }
 
-  function setPlayerSrc(src) {
-    console.log('Setting player src to:', src);
-    const wasPlaying = !player.paused;
-    player.pause();
-    player.removeAttribute('src');   // flush
-    player.load();
-    player.src = src;
-    player.load();
-    if (wasPlaying) player.play().catch(()=>{});
-  }
+    function normalizeSrc(input) {
+      input = (input || '').trim();
+      if (!input) return null;
 
-  async function applySync(state) {
-    if (state.src && player.currentSrc !== state.src) {
-      setPlayerSrc(state.src);
-    }
-    let target = state.time;
-    if (state.playing) {
-      const drift = (Date.now() - state.updatedAt) / 1000;
-      target += drift;
-    }
-    await setCurrentTime(target);
+      try {
+        const asURL = new URL(input, location.origin);
+        // /proxy absolu ou relatif → force encodage
+        if (asURL.origin === location.origin && asURL.pathname === '/proxy') {
+          const raw = asURL.searchParams.get('u');
+          if (!raw) return null;
+          return '/proxy?u=' + encodeURIComponent(raw);
+        }
+        // /video-remote
+        if (asURL.origin === location.origin && asURL.pathname === '/video-remote') {
+          return '/video-remote';
+        }
+        // HTTPS externe OK
+        if (asURL.protocol === 'https:') return asURL.toString();
+        // HTTP externe → wrap proxy
+        if (asURL.protocol === 'http:' && location.protocol === 'https:') {
+          return '/proxy?u=' + encodeURIComponent(asURL.toString());
+        }
+      } catch { /* non-URL */ }
 
-    if (state.playing && player.paused) {
-      isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
-    }
-    if (!state.playing && !player.paused) {
-      isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
-    }
-  }
-
-  // Normalise ce que l'utilisateur colle dans le champ
-  function normalizeSrc(input) {
-    input = (input || '').trim();
-    if (!input) return null;
-
-    // 1) Si c'est une URL absolue (http/https ou notre domaine)
-    try {
-      const asURL = new URL(input, location.origin);
-
-      // a) Notre /proxy avec u=... (absolu ou relatif) -> forcer encodage
-      if (asURL.origin === location.origin && asURL.pathname === '/proxy') {
-        const raw = asURL.searchParams.get('u');
+      // /proxy?u=... relatif
+      if (input.startsWith('/proxy')) {
+        const sp = new URLSearchParams(input.split('?')[1] || '');
+        const raw = sp.get('u');
         if (!raw) return null;
-        return '/proxy?u=' + encodeURIComponent(raw);
+        try { return '/proxy?u=' + encodeURIComponent(decodeURIComponent(raw)); }
+        catch { return '/proxy?u=' + encodeURIComponent(raw); }
       }
 
-      // b) Notre /video-remote (absolu ou relatif)
-      if (asURL.origin === location.origin && asURL.pathname === '/video-remote') {
-        return '/video-remote';
+      if (input === '/video-remote') return input;
+      if (!input.includes('://') && !input.startsWith('/proxy')) return input; // ex: episode1.mp4
+      return null;
+    }
+
+    // Local → serveur
+    player.addEventListener('play',   () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play', time: player.currentTime })); });
+    player.addEventListener('pause',  () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time: player.currentTime })); });
+    player.addEventListener('seeking',() => { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time: player.currentTime })); });
+
+    // Définir la source commune
+    setSrcBtn.addEventListener('click', () => {
+      const finalSrc = normalizeSrc(srcInput.value);
+      log('Clicked setSrc with:', srcInput.value, '→ normalized:', finalSrc);
+      if (!finalSrc) { alert("URL invalide. Exemples : /video-remote, /proxy?u=http://..., /proxy?u=http%3A%2F%2F..., https://..."); return; }
+      setPlayerSrc(finalSrc); // MAJ locale immédiate
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'setSource', src: finalSrc }));
       }
+      log('Source définie pour tous →', finalSrc);
+    });
 
-      // c) HTTPS externe -> OK direct (pas de mixed content)
-      if (asURL.protocol === 'https:') return asURL.toString();
+    // Boutons de test directs
+    testVideoRemote.addEventListener('click', () => {
+      const src = '/video-remote';
+      log('Test /video-remote');
+      setPlayerSrc(src);
+    });
 
-      // d) HTTP externe en contexte HTTPS -> wrap dans /proxy
-      if (asURL.protocol === 'http:' && location.protocol === 'https:') {
-        return '/proxy?u=' + encodeURIComponent(asURL.toString());
-      }
-    } catch {
-      // pas une URL absolue; continue
-    }
+    testProxyEncoded.addEventListener('click', () => {
+      const enc = '/proxy?u=' + encodeURIComponent('http://vipvodle.top:8080/movie/VOD0176173538414492/91735384144872/28620.mp4');
+      log('Test /proxy encodé:', enc);
+      setPlayerSrc(enc);
+    });
 
-    // 2) Si l'utilisateur a directement mis /proxy?u=... (relatif)
-    if (input.startsWith('/proxy')) {
-      const sp = new URLSearchParams(input.split('?')[1] || '');
-      const raw = sp.get('u');
-      if (!raw) return null;
-      try { return '/proxy?u=' + encodeURIComponent(decodeURIComponent(raw)); }
-      catch { return '/proxy?u=' + encodeURIComponent(raw); }
-    }
+    // Rejoindre/URL
+    joinBtn.addEventListener('click', () => {
+      const room = (roomInput.value || 'amis').trim();
+      const nextURL = new URL(location.href);
+      nextURL.searchParams.set('room', room);
+      history.replaceState(null, '', nextURL.toString());
+      connect(room);
+    });
 
-    // 3) Cas simple: /video-remote ou fichier/chemin relatif (episode1.mp4)
-    if (input === '/video-remote') return input;
-    if (!input.includes('://') && !input.startsWith('/proxy')) return input;
+    copyBtn.addEventListener('click', async () => {
+      const room = (roomInput.value || 'amis').trim();
+      const link = new URL(location.href);
+      link.searchParams.set('room', room);
+      await navigator.clipboard.writeText(link.toString());
+      copyBtn.textContent = 'Lien copié ✓';
+      setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
+    });
 
-    // Sinon invalide
-    return null;
-  }
+    syncBtn.addEventListener('click', () => {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'syncRequest' }));
+    });
 
-  // Actions locales -> serveur
-  player.addEventListener('play',   () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play', time: player.currentTime })); });
-  player.addEventListener('pause',  () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time: player.currentTime })); });
-  player.addEventListener('seeking',() => { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time: player.currentTime })); });
+    // Fichier local (non partagé)
+    filePicker.addEventListener('change', () => {
+      const f = filePicker.files?.[0];
+      if (f) { const url = URL.createObjectURL(f); setPlayerSrc(url); log('Local file:', f.name); }
+    });
 
-  // Définir la source commune (béton)
-  setSrcBtn.addEventListener('click', () => {
-    const finalSrc = normalizeSrc(srcInput.value);
-    if (!finalSrc) {
-      alert("URL invalide. Exemples : /video-remote, /proxy?u=http://..., /proxy?u=http%3A%2F%2F..., https://...");
-      return;
-    }
-    setPlayerSrc(finalSrc); // MAJ locale immédiate
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'setSource', src: finalSrc }));
-    }
-    console.log('Source définie pour tous →', finalSrc);
-  });
+    // Logs vidéo utiles
+    ['loadedmetadata','canplay','play','pause','error','stalled','waiting'].forEach(ev => {
+      player.addEventListener(ev, () => log('[video]', ev, 'src=', player.currentSrc, 'err=', player.error?.code || 0));
+    });
 
-  // Rejoindre une salle
-  joinBtn.addEventListener('click', () => {
-    const room = (roomInput.value || 'amis').trim();
-    const nextURL = new URL(location.href);
-    nextURL.searchParams.set('room', room);
-    history.replaceState(null, '', nextURL.toString());
-    connect(room);
-  });
-
-  // Copier le lien
-  copyBtn.addEventListener('click', async () => {
-    const room = (roomInput.value || 'amis').trim();
-    const link = new URL(location.href);
-    link.searchParams.set('room', room);
-    await navigator.clipboard.writeText(link.toString());
-    copyBtn.textContent = 'Lien copié ✓';
-    setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
-  });
-
-  // Re-sync manuel
-  syncBtn.addEventListener('click', () => {
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'syncRequest' }));
-  });
-
-  // Fichier local (non partagé)
-  filePicker.addEventListener('change', () => {
-    const f = filePicker.files?.[0];
-    if (f) { const url = URL.createObjectURL(f); setPlayerSrc(url); console.log('Local file:', f.name); }
-  });
-
-  // Logs utiles
-  player.addEventListener('error', () => {
-    console.error('Video error:', player.error, 'currentSrc=', player.currentSrc);
-  });
-
-  connect(initialRoom);
-</script>
-
-
+    // Go
+    setBadge(wsStatus, '—');
+    setSrcBadge();
+    connect(initialRoom);
+  </script>
 </body>
 </html>
