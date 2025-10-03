@@ -7,67 +7,97 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+/* ---------- Helpers pour proxy vidéo ---------- */
+
+function addCommonHeaders(proxyReq, refererOrigin, req) {
+  const range = req.headers['range'];
+  if (range) proxyReq.setHeader('range', range); // permettre le seek
+  proxyReq.setHeader('user-agent', req.headers['user-agent'] || 'Mozilla/5.0');
+  // Certains serveurs exigent un referer sur leur propre domaine :
+  if (refererOrigin) {
+    proxyReq.setHeader('referer', refererOrigin.endsWith('/') ? refererOrigin : refererOrigin + '/');
+  }
+}
+
+// Réécrit les redirections 30x pour rester derrière notre proxy
+function rewriteRedirectToProxy(proxyRes, baseOrigin) {
+  const sc = proxyRes.statusCode || 0;
+  if ([301, 302, 303, 307, 308].includes(sc)) {
+    const loc = proxyRes.headers['location'];
+    if (loc) {
+      try {
+        const abs = new URL(loc, baseOrigin);
+        // Réécrire vers /proxy?u=<abs>
+        proxyRes.headers['location'] = '/proxy?u=' + encodeURIComponent(abs.toString());
+      } catch (_) { /* ignore */ }
+    }
+  }
+}
+
+// Force un type vidéo si upstream renvoie octet-stream / nothing
+function ensureVideoContentType(proxyRes) {
+  const ct = proxyRes.headers['content-type'] || '';
+  if (!ct || /octet-stream/i.test(ct)) {
+    proxyRes.headers['content-type'] = 'video/mp4';
+  }
+}
+
 /* ---------- Statique + healthcheck ---------- */
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
 /* ---------- Proxy fixe: /video-remote (HTTP -> via HTTPS) ---------- */
-/* Change seulement le chemin dans pathRewrite si tu veux une autre vidéo par défaut */
+// Chemin de la vidéo "par défaut"
+const FIXED_ORIGIN = 'http://vipvodle.top:8080';
+const FIXED_PATH   = '/movie/VOD0176173538414492/91735384144872/28620.mp4';
+
 app.use(
   '/video-remote',
   createProxyMiddleware({
-    target: 'http://vipvodle.top:8080',
+    target: FIXED_ORIGIN,
     changeOrigin: true,
     secure: false,
-    pathRewrite: () =>
-      '/movie/VOD0176173538414492/91735384144872/28620.mp4',
-    onProxyReq: (proxyReq, req) => {
-      const range = req.headers['range'];
-      if (range) proxyReq.setHeader('range', range); // seek
-      proxyReq.setHeader('user-agent', 'Mozilla/5.0');
-      proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
-    },
+    pathRewrite: () => FIXED_PATH,
+    onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, FIXED_ORIGIN, req),
     onProxyRes: (proxyRes) => {
-      // Si le serveur source met octet-stream (ou rien), force un type vidéo
-      const ct = proxyRes.headers['content-type'] || '';
-      if (!ct || /octet-stream/i.test(ct)) {
-        proxyRes.headers['content-type'] = 'video/mp4';
-      }
-    }
+      // si upstream renvoie 302, on garde la redirection via notre /proxy
+      rewriteRedirectToProxy(proxyRes, FIXED_ORIGIN);
+      ensureVideoContentType(proxyRes);
+    },
+    followRedirects: false
   })
 );
 
 /* ---------- Proxy dynamique: /proxy?u=<URL complète> ---------- */
-/* Permet d’utiliser n’importe quel lien HTTP/HTTPS dans l’UI */
-app.get('/proxy', (req, _res, next) => {              // petit log utile
+app.get('/proxy', (req, _res, next) => {
   console.log('GET /proxy called with u=', req.query.u);
   next();
 });
+
 app.use('/proxy', (req, res, next) => {
   const raw = req.query.u;
   if (!raw) return res.status(400).send('Missing u');
 
-  let u;
-  try { u = new URL(raw); }
+  let targetURL;
+  try { targetURL = new URL(raw); }
   catch { return res.status(400).send('Bad URL'); }
 
+  const targetOrigin = targetURL.origin;
+  const targetPathQS = targetURL.pathname + targetURL.search;
+
   return createProxyMiddleware({
-    target: u.origin,                  // ex: http://vipvodle.top:8080
+    target: targetOrigin,
     changeOrigin: true,
     secure: false,
-    pathRewrite: () => u.pathname + u.search,
-    onProxyReq: (proxyReq, req) => {
-      const range = req.headers['range'];
-      if (range) proxyReq.setHeader('range', range);  // pour le seek
-      proxyReq.setHeader('user-agent', 'Mozilla/5.0');
-      proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
-    },
+    // On remplace le chemin par celui de l'URL à proxifier
+    pathRewrite: () => targetPathQS,
+    onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, targetOrigin, req),
     onProxyRes: (proxyRes) => {
-      const ct = proxyRes.headers['content-type'] || '';
-      if (!ct || /octet-stream/i.test(ct)) {
-        proxyRes.headers['content-type'] = 'video/mp4';
-      }
-    }
+      // Réécrit les éventuelles redirections vers /proxy?u=...
+      rewriteRedirectToProxy(proxyRes, targetOrigin);
+      ensureVideoContentType(proxyRes);
+    },
+    followRedirects: false
   })(req, res, next);
 });
 
@@ -79,7 +109,6 @@ const server = app.listen(PORT, () => {
 /* ---------- WebSocket /watchparty ---------- */
 const wss = new WebSocketServer({ server, path: '/watchparty' });
 
-// État par salle : lecture/temps/source
 const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, updatedAt, src } }
 
 function getOrCreateRoom(roomId) {
@@ -131,7 +160,6 @@ wss.on('connection', (ws, req) => {
   const room = getOrCreateRoom(roomId);
   room.clients.add(ws);
 
-  // état complet (inclut src)
   ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
 
   ws.on('message', (raw) => {
@@ -139,15 +167,13 @@ wss.on('connection', (ws, req) => {
 
     if (msg.type === 'setSource') {
       applyAction(room, msg);
-      // on notifie TOUT LE MONDE (y compris l'émetteur) pour refléter la nouvelle source
-      broadcast(room, msg, null);
+      broadcast(room, msg, null); // notifier tout le monde
       return;
     }
 
     if (['play','pause','seek'].includes(msg.type)) {
       applyAction(room, msg);
-      // pour play/pause/seek on exclut l'émetteur
-      broadcast(room, msg, ws);
+      broadcast(room, msg, ws);    // exclure l’émetteur
     } else if (msg.type === 'syncRequest') {
       ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
     }
