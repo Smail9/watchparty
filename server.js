@@ -19,11 +19,11 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 
 // Proxy vers la vidéo distante (HTTP) -> évite le mixed content
 app.use('/video-remote', createProxyMiddleware({
-  target: 'http://vipforj.top:8080',
+  target: 'vipvodle.top:8080',
   changeOrigin: true,
   secure: false,
   // on force le chemin de la vidéo
-  pathRewrite: () => '/movie/VIP013173488354629/31734883546321/132577.mkv',
+  pathRewrite: () => '/movie/VOD0176173538414492/91735384144872/28596.avi',
   // on propage l'entête Range pour permettre le seek
   onProxyReq: (proxyReq, req) => {
     const range = req.headers['range'];
@@ -97,4 +97,5 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+
 
