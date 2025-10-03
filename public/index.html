@@ -34,27 +34,127 @@
     </div>
   </div>
 
-  <script>
-    const player = document.getElementById('player');
-    const roomInput = document.getElementById('roomInput');
-    const joinBtn = document.getElementById('joinBtn');
-    const copyBtn = document.getElementById('copyBtn');
-    const filePicker = document.getElementById('filePicker');
-    const syncBtn = document.getElementById('syncBtn');
+ <script>
+  const player = document.getElementById('player');
+  const roomInput = document.getElementById('roomInput');
+  const joinBtn = document.getElementById('joinBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const filePicker = document.getElementById('filePicker');
+  const syncBtn = document.getElementById('syncBtn');
 
-    const urlParams = new URLSearchParams(location.search);
-    const initialRoom = urlParams.get('room') || 'amis';
-    roomInput.value = initialRoom;
+  const urlParams = new URLSearchParams(location.search);
+  const initialRoom = urlParams.get('room') || 'amis';
+  roomInput.value = initialRoom;
 
-    let ws = null;
-    let isRemoteUpdate = false;
+  let ws = null;
+  let isRemoteUpdate = false;
 
-    function wsURL(room) {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
+  function wsURL(room) {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
+  }
+
+  function connect(room) {
+    if (ws) { try { ws.close(); } catch(_){} }
+    ws = new WebSocket(wsURL(room));
+
+    ws.onopen = () => console.log('WS open:', ws.url);
+    ws.onclose = () => console.log('WS closed');
+    ws.onerror = (e) => console.error('WS error', e);
+
+    ws.onmessage = async (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
+
+      if (msg.type === 'syncState' && msg.state) {
+        await applySync(msg.state);
+      } else if (msg.type === 'play') {
+        await setCurrentTime(msg.time || 0);
+        isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
+      } else if (msg.type === 'pause') {
+        await setCurrentTime(msg.time || 0);
+        isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+      } else if (msg.type === 'seek') {
+        await setCurrentTime(msg.time || 0);
+      }
+    };
+  }
+
+  async function setCurrentTime(t) {
+    // Ajuste seulement si l'écart > 0.4s
+    if (Math.abs(player.currentTime - t) > 0.4) {
+      player.currentTime = t;
+      await new Promise(r => setTimeout(r, 0));
     }
+  }
 
-    function connect(room) {
-      if (ws) { try { ws.close(); } catch(_){} }
-      ws = new WebSocket(wsURL(room));
-      ws.onmessage = async (ev) => {
+  async function applySync(state) {
+    let target = state.time;
+    if (state.playing) {
+      const drift = (Date.now() - state.updatedAt) / 1000; // ms -> s
+      target += drift;
+    }
+    await setCurrentTime(target);
+
+    if (state.playing && player.paused) {
+      isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
+    }
+    if (!state.playing && !player.paused) {
+      isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+    }
+  }
+
+  // Actions locales -> serveur
+  player.addEventListener('play', () => {
+    if (!ws || isRemoteUpdate) return;
+    ws.send(JSON.stringify({ type: 'play', time: player.currentTime }));
+  });
+  player.addEventListener('pause', () => {
+    if (!ws || isRemoteUpdate) return;
+    ws.send(JSON.stringify({ type: 'pause', time: player.currentTime }));
+  });
+  player.addEventListener('seeking', () => {
+    if (!ws) return;
+    ws.send(JSON.stringify({ type: 'seek', time: player.currentTime }));
+  });
+
+  // Rejoindre une salle
+  joinBtn.addEventListener('click', () => {
+    const room = (roomInput.value || 'amis').trim();
+    const nextURL = new URL(location.href);
+    nextURL.searchParams.set('room', room);
+    history.replaceState(null, '', nextURL.toString());
+    connect(room);
+  });
+
+  // Copier le lien
+  copyBtn.addEventListener('click', async () => {
+    const room = (roomInput.value || 'amis').trim();
+    const link = new URL(location.href);
+    link.searchParams.set('room', room);
+    await navigator.clipboard.writeText(link.toString());
+    copyBtn.textContent = 'Lien copié ✓';
+    setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
+  });
+
+  // Re-sync manuel
+  syncBtn.addEventListener('click', () => {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'syncRequest' }));
+    }
+  });
+
+  // Charger un fichier local
+  filePicker.addEventListener('change', () => {
+    const f = filePicker.files?.[0];
+    if (f) {
+      const url = URL.createObjectURL(f);
+      player.src = url;
+      player.load();
+      console.log('Local file loaded:', f.name);
+    }
+  });
+
+  // Connexion auto à la salle depuis l'URL
+  connect(initialRoom);
+</script>
