@@ -15,6 +15,21 @@ app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 const server = app.listen(PORT, () => {
   console.log(`HTTP server running on port ${PORT}`);
 });
+const { createProxyMiddleware } = require('http-proxy-middleware');
+
+// Proxy vers la vidéo distante (HTTP) -> évite le mixed content
+app.use('/video-remote', createProxyMiddleware({
+  target: 'http://vipforj.top:8080',
+  changeOrigin: true,
+  secure: false,
+  // on force le chemin de la vidéo
+  pathRewrite: () => '/movie/VIP013173488354629/31734883546321/132577.mkv',
+  // on propage l'entête Range pour permettre le seek
+  onProxyReq: (proxyReq, req) => {
+    const range = req.headers['range'];
+    if (range) proxyReq.setHeader('range', range);
+  }
+}));
 
 // WebSocket sur /watchparty
 const wss = new WebSocketServer({ server, path: '/watchparty' });
@@ -82,3 +97,4 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+
