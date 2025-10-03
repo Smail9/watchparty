@@ -11,27 +11,48 @@ const PORT = process.env.PORT || 8080;
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-/* ---------- Proxy HTTPS -> HTTP (évite mixed content) ---------- */
-/* Si tu veux toujours utiliser l’URL http://vipvodle.top:8080/... */
+/* ---------- Proxy fixe: /video-remote -> URL HTTP (évite le mixed content) ---------- */
+/* Modifie pathRewrite si tu veux une autre vidéo par défaut */
 app.use(
   '/video-remote',
   createProxyMiddleware({
     target: 'http://vipvodle.top:8080',
     changeOrigin: true,
     secure: false,
-    // chemin exact de ta vidéo distante :
     pathRewrite: () =>
       '/movie/VOD0176173538414492/91735384144872/28620.mp4',
-    // support du Range pour le seek :
     onProxyReq: (proxyReq, req) => {
       const range = req.headers['range'];
-      if (range) proxyReq.setHeader('range', range);
-      // certains serveurs aiment avoir un UA/Referer :
+      if (range) proxyReq.setHeader('range', range); // seek
       proxyReq.setHeader('user-agent', 'Mozilla/5.0');
-      proxyReq.setHeader('referer', 'https://watchparty-2.onrender.com/');
+      proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
     },
   })
 );
+
+/* ---------- Proxy dynamique: /proxy?u=http://... ---------- */
+/* Permet de coller n'importe quel lien dans l'UI */
+app.use('/proxy', (req, res, next) => {
+  const raw = req.query.u;
+  if (!raw) return res.status(400).send('Missing u');
+
+  let u;
+  try { u = new URL(raw); }
+  catch { return res.status(400).send('Bad URL'); }
+
+  return createProxyMiddleware({
+    target: u.origin,
+    changeOrigin: true,
+    secure: false,
+    pathRewrite: () => u.pathname + u.search,
+    onProxyReq: (proxyReq, req) => {
+      const range = req.headers['range'];
+      if (range) proxyReq.setHeader('range', range);
+      proxyReq.setHeader('user-agent', 'Mozilla/5.0');
+      proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
+    },
+  })(req, res, next);
+});
 
 /* ---------- Démarrage HTTP ---------- */
 const server = app.listen(PORT, () => {
@@ -54,11 +75,11 @@ function getOrCreateRoom(roomId) {
   return rooms.get(roomId);
 }
 
-function broadcast(room, payload, except) {
+function broadcast(room, payload, except /* peut être null */) {
   for (const client of room.clients) {
-    if (client !== except && client.readyState === 1) {
-      try { client.send(JSON.stringify(payload)); } catch {}
-    }
+    if (client.readyState !== 1) continue;
+    if (except && client === except) continue;
+    try { client.send(JSON.stringify(payload)); } catch {}
   }
 }
 
@@ -98,8 +119,17 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
-    if (['play','pause','seek','setSource'].includes(msg.type)) {
+
+    if (msg.type === 'setSource') {
       applyAction(room, msg);
+      // Pour setSource, on notifie TOUT LE MONDE (y compris l'émetteur)
+      broadcast(room, msg, null);
+      return;
+    }
+
+    if (['play','pause','seek'].includes(msg.type)) {
+      applyAction(room, msg);
+      // Pour play/pause/seek: on exclut l'émetteur
       broadcast(room, msg, ws);
     } else if (msg.type === 'syncRequest') {
       ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
