@@ -39,64 +39,38 @@ const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, 
 
 function getOrCreateRoom(roomId) {
   if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      clients: new Set(),
-      state: { playing: false, time: 0, updatedAt: Date.now() }
-    });
-  }
-  return rooms.get(roomId);
-}
+   // état initial
+rooms.set(roomId, {
+  clients: new Set(),
+  state: { playing: false, time: 0, updatedAt: Date.now(), src: null }
+});
 
-function broadcast(room, payload, except) {
-  for (const client of room.clients) {
-    if (client !== except && client.readyState === 1) {
-      try { client.send(JSON.stringify(payload)); } catch {}
-    }
-  }
-}
-
+// appliquer les actions
 function applyAction(room, action) {
   const now = Date.now();
-  if (action.type === 'seek') {
-    room.state.time = action.time || 0;
+  if (action.type === 'setSource') {
+    room.state.src = action.src;     // <= nouvelle source
+    room.state.time = 0;
     room.state.updatedAt = now;
-  } else if (action.type === 'play') {
-    room.state.playing = true;
-    room.state.time = action.time ?? room.state.time;
-    room.state.updatedAt = now;
-  } else if (action.type === 'pause') {
     room.state.playing = false;
-    room.state.time = action.time ?? room.state.time;
-    room.state.updatedAt = now;
+    return;                           // on diffuse plus bas
   }
+  // ... play/pause/seek comme avant
 }
 
-wss.on('connection', (ws, req) => {
-  const params = new URLSearchParams(req.url.split('?')[1] || '');
-  const roomId = params.get('room') || 'default';
-  const room = getOrCreateRoom(roomId);
-  room.clients.add(ws);
+// dans wss.on('connection'): après avoir ajouté le client
+ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
 
-  // Envoi de l'état courant au nouveau client
-  ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
-
-  ws.on('message', raw => {
-    let msg; try { msg = JSON.parse(raw); } catch { return; }
-    if (['play', 'pause', 'seek'].includes(msg.type)) {
-      applyAction(room, msg);
-      broadcast(room, msg, ws);
-    } else if (msg.type === 'syncRequest') {
-      ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
-    }
-  });
-
-  ws.on('close', () => {
-    room.clients.delete(ws);
-    if (room.clients.size === 0) {
-      setTimeout(() => { if (room.clients.size === 0) rooms.delete(roomId); }, 5 * 60 * 1000);
-    }
-  });
+ws.on('message', raw => {
+  let msg; try { msg = JSON.parse(raw); } catch { return; }
+  if (['play','pause','seek','setSource'].includes(msg.type)) {
+    applyAction(room, msg);
+    broadcast(room, msg, ws);
+  } else if (msg.type === 'syncRequest') {
+    ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
+  }
 });
+
 
 
 
