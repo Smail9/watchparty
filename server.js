@@ -4,30 +4,19 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
-const app = express();
-const PORT = process.env.PORT || 8080;
-
-// -------- Statique & santé
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/healthz', (_req, res) => res.status(200).send('ok'));
-
-// -------- (Optionnel) Proxy HTTPS -> HTTP pour éviter le mixed content
-//   Si tu n'en as pas besoin, commente ce bloc et la ligne <source src="/video-remote">
-app.use(
-  '/video-remote',
-  createProxyMiddleware({
-    target: 'http://vipvodle.top:8080',
-    changeOrigin: true,
-    secure: false,
-    // Chemin exact vers la ressource distante (à adapter)
-    pathRewrite: () => '/movie/VOD0176173538414492/91735384144872/28620.mp4',
-    // Support du "Range" pour le seek
-    onProxyReq: (proxyReq, req) => {
-      const range = req.headers['range'];
-      if (range) proxyReq.setHeader('range', range);
-    },
-  })
-);
+app.use('/video-remote', createProxyMiddleware({
+  target: 'http://vipvodle.top:8080',
+  changeOrigin: true,
+  secure: false,
+  pathRewrite: () => '/movie/VOD0176173538414492/91735384144872/28620.mp4',
+  onProxyReq: (proxyReq, req) => {
+    const range = req.headers['range'];
+    if (range) proxyReq.setHeader('range', range);
+    // (optionnel) certains serveurs exigent un UA/Referer
+    proxyReq.setHeader('user-agent', 'Mozilla/5.0');
+    proxyReq.setHeader('referer', 'https://watchparty-2.onrender.com/');
+  },
+}));
 
 // -------- Démarrage HTTP
 const server = app.listen(PORT, () => {
@@ -118,3 +107,4 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+
