@@ -17,15 +17,23 @@
   <div class="wrap">
     <h1>Watch Party</h1>
 
+    <!-- Salle -->
     <div class="row">
-  <input id="srcInput" type="url" placeholder="https://... .mp4" style="min-width:360px" />
-  <button id="setSrcBtn">Définir la vidéo pour tous</button>
-</div>
+      <span>Salle :</span>
+      <input id="roomInput" type="text" placeholder="amis" />
+      <button id="joinBtn">Créer/Rejoindre</button>
+      <button id="copyBtn">Copier le lien d'invitation</button>
+    </div>
 
+    <!-- Définir une source commune (URL HTTPS ou /video-remote) -->
+    <div class="row">
+      <input id="srcInput" type="url" placeholder="https://... .mp4 (ou /video-remote)" style="min-width:360px" />
+      <button id="setSrcBtn">Définir la vidéo pour tous</button>
+    </div>
 
+    <!-- Vidéo (tu peux laisser /video-remote par défaut si tu veux) -->
     <video id="player" controls preload="metadata">
-      <!-- Si tu veux utiliser la vidéo proxifiée depuis server.js -->
-      <source src="/video-remote" type="video/mp4">
+      <source src="/video-remote" type="video/mp4" />
     </video>
 
     <div class="row">
@@ -35,88 +43,124 @@
   </div>
 
   <script>
-    // server.js — extrait : état des rooms + applyAction + onmessage
+    const player = document.getElementById('player');
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const filePicker = document.getElementById('filePicker');
+    const syncBtn = document.getElementById('syncBtn');
+    const srcInput = document.getElementById('srcInput');
+    const setSrcBtn = document.getElementById('setSrcBtn');
 
-// ... (tes imports/express/proxy identiques)
+    const urlParams = new URLSearchParams(location.search);
+    const initialRoom = urlParams.get('room') || 'amis';
+    roomInput.value = initialRoom;
 
-const wss = new WebSocketServer({ server, path: '/watchparty' });
+    let ws = null;
+    let isRemoteUpdate = false;
 
-// === Gestion des salles ===
-const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, updatedAt, src } }
+    function wsURL(room) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
+    }
 
-function getOrCreateRoom(roomId) {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      clients: new Set(),
-      state: { playing: false, time: 0, updatedAt: Date.now(), src: null } // <-- src ajouté
+    function connect(room) {
+      if (ws) { try { ws.close(); } catch(_){} }
+      ws = new WebSocket(wsURL(room));
+
+      ws.onopen  = () => console.log('WS open:', ws.url);
+      ws.onclose = () => console.log('WS closed');
+      ws.onerror = (e) => console.error('WS error', e);
+
+      ws.onmessage = async (ev) => {
+        let msg; try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
+
+        if (msg.type === 'syncState' && msg.state) {
+          await applySync(msg.state);
+        } else if (msg.type === 'play') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
+        } else if (msg.type === 'pause') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+        } else if (msg.type === 'seek') {
+          await setCurrentTime(msg.time || 0);
+        } else if (msg.type === 'setSource') {
+          if (msg.src) { player.src = msg.src; player.load(); }
+        }
+      };
+    }
+
+    async function setCurrentTime(t) {
+      if (Math.abs(player.currentTime - t) > 0.4) {
+        player.currentTime = t;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+
+    async function applySync(state) {
+      if (state.src && player.currentSrc !== state.src) {
+        player.src = state.src; player.load();
+      }
+      let target = state.time;
+      if (state.playing) {
+        const drift = (Date.now() - state.updatedAt) / 1000;
+        target += drift;
+      }
+      await setCurrentTime(target);
+
+      if (state.playing && player.paused) {
+        isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
+      }
+      if (!state.playing && !player.paused) {
+        isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+      }
+    }
+
+    // Actions locales -> serveur
+    player.addEventListener('play',   () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play', time: player.currentTime })); });
+    player.addEventListener('pause',  () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time: player.currentTime })); });
+    player.addEventListener('seeking',() => { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time: player.currentTime })); });
+
+    // Définir la source commune
+    setSrcBtn.addEventListener('click', () => {
+      const src = (srcInput.value || '').trim();
+      if (!src) return;
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'setSource', src }));
+      }
     });
-  }
-  return rooms.get(roomId);
-}
 
-function broadcast(room, payload, except) {
-  for (const client of room.clients) {
-    if (client !== except && client.readyState === 1) {
-      try { client.send(JSON.stringify(payload)); } catch {}
-    }
-  }
-}
+    // Rejoindre une salle
+    joinBtn.addEventListener('click', () => {
+      const room = (roomInput.value || 'amis').trim();
+      const nextURL = new URL(location.href);
+      nextURL.searchParams.set('room', room);
+      history.replaceState(null, '', nextURL.toString());
+      connect(room);
+    });
 
-function applyAction(room, action) {
-  const now = Date.now();
+    // Copier le lien
+    copyBtn.addEventListener('click', async () => {
+      const room = (roomInput.value || 'amis').trim();
+      const link = new URL(location.href);
+      link.searchParams.set('room', room);
+      await navigator.clipboard.writeText(link.toString());
+      copyBtn.textContent = 'Lien copié ✓';
+      setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
+    });
 
-  // <-- NOUVEAU: changer la source commune
-  if (action.type === 'setSource') {
-    room.state.src = action.src || null;
-    room.state.time = 0;
-    room.state.playing = false;
-    room.state.updatedAt = now;
-    return;
-  }
+    // Re-sync manuel
+    syncBtn.addEventListener('click', () => {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'syncRequest' }));
+    });
 
-  if (action.type === 'seek') {
-    room.state.time = action.time || 0;
-    room.state.updatedAt = now;
-  } else if (action.type === 'play') {
-    room.state.playing = true;
-    room.state.time = action.time ?? room.state.time;
-    room.state.updatedAt = now;
-  } else if (action.type === 'pause') {
-    room.state.playing = false;
-    room.state.time = action.time ?? room.state.time;
-    room.state.updatedAt = now;
-  }
-}
+    // Fichier local (non partagé)
+    filePicker.addEventListener('change', () => {
+      const f = filePicker.files?.[0];
+      if (f) { const url = URL.createObjectURL(f); player.src = url; player.load(); console.log('Local file:', f.name); }
+    });
 
-wss.on('connection', (ws, req) => {
-  const params = new URLSearchParams(req.url.split('?')[1] || '');
-  const roomId = params.get('room') || 'default';
-  const room = getOrCreateRoom(roomId);
-  room.clients.add(ws);
-
-  // État complet envoyé au nouveau client (inclut src)
-  ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
-
-  ws.on('message', raw => {
-    let msg; try { msg = JSON.parse(raw); } catch { return; }
-    if (['play', 'pause', 'seek', 'setSource'].includes(msg.type)) { // <-- setSource pris en compte
-      applyAction(room, msg);
-      broadcast(room, msg, ws);
-    } else if (msg.type === 'syncRequest') {
-      ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
-    }
-  });
-
-  ws.on('close', () => {
-    room.clients.delete(ws);
-    if (room.clients.size === 0) {
-      setTimeout(() => { if (room.clients.size === 0) rooms.delete(roomId); }, 5 * 60 * 1000);
-    }
-  });
-});
-
-
-    // Connexion auto à la salle depuis l'URL
     connect(initialRoom);
   </script>
 </body>
