@@ -17,7 +17,6 @@
   <div class="wrap">
     <h1>Watch Party</h1>
 
-    <!-- Salle -->
     <div class="row">
       <span>Salle :</span>
       <input id="roomInput" type="text" placeholder="amis" />
@@ -25,14 +24,14 @@
       <button id="copyBtn">Copier le lien d'invitation</button>
     </div>
 
-    <!-- Définir une source commune (URL HTTPS ou /video-remote) -->
     <div class="row">
-      <input id="srcInput" type="url" placeholder="https://... .mp4 (ou /video-remote)" style="min-width:360px" />
+      <!-- Tu peux taper /video-remote ou /proxy?u=http://... -->
+      <input id="srcInput" type="url" placeholder="/video-remote OU /proxy?u=http://..." style="min-width:420px" />
       <button id="setSrcBtn">Définir la vidéo pour tous</button>
     </div>
 
-    <!-- Vidéo (tu peux laisser /video-remote par défaut si tu veux) -->
     <video id="player" controls preload="metadata">
+      <!-- Par défaut on met le proxy fixe -->
       <source src="/video-remote" type="video/mp4" />
     </video>
 
@@ -122,10 +121,22 @@
     player.addEventListener('pause',  () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time: player.currentTime })); });
     player.addEventListener('seeking',() => { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time: player.currentTime })); });
 
-    // Définir la source commune
+    // Définir la source commune : on met à jour localement et on prévient les autres
     setSrcBtn.addEventListener('click', () => {
       const src = (srcInput.value || '').trim();
       if (!src) return;
+
+      // Si l'utilisateur colle un http:// brut => recommander le proxy
+      if (src.startsWith('http://') && location.protocol === 'https:') {
+        alert("Ton site est en HTTPS : utilise /proxy?u=http://… ou /video-remote pour éviter le 'mixed content'.");
+        return;
+      }
+
+      // 1) MAJ locale immédiate (l'hôte voit le changement tout de suite)
+      player.src = src;
+      player.load();
+
+      // 2) Notifier tous les clients (y compris soi-même via le serveur)
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ type: 'setSource', src }));
       }
