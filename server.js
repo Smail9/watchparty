@@ -4,29 +4,44 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
-app.use('/video-remote', createProxyMiddleware({
-  target: 'http://vipvodle.top:8080',
-  changeOrigin: true,
-  secure: false,
-  pathRewrite: () => '/movie/VOD0176173538414492/91735384144872/28620.mp4',
-  onProxyReq: (proxyReq, req) => {
-    const range = req.headers['range'];
-    if (range) proxyReq.setHeader('range', range);
-    // (optionnel) certains serveurs exigent un UA/Referer
-    proxyReq.setHeader('user-agent', 'Mozilla/5.0');
-    proxyReq.setHeader('referer', 'https://watchparty-2.onrender.com/');
-  },
-}));
+const app = express();
+const PORT = process.env.PORT || 8080;
 
-// -------- Démarrage HTTP
+/* ---------- Contenu statique + healthcheck ---------- */
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/healthz', (_req, res) => res.status(200).send('ok'));
+
+/* ---------- Proxy HTTPS -> HTTP (évite mixed content) ---------- */
+/* Si tu veux toujours utiliser l’URL http://vipvodle.top:8080/... */
+app.use(
+  '/video-remote',
+  createProxyMiddleware({
+    target: 'http://vipvodle.top:8080',
+    changeOrigin: true,
+    secure: false,
+    // chemin exact de ta vidéo distante :
+    pathRewrite: () =>
+      '/movie/VOD0176173538414492/91735384144872/28620.mp4',
+    // support du Range pour le seek :
+    onProxyReq: (proxyReq, req) => {
+      const range = req.headers['range'];
+      if (range) proxyReq.setHeader('range', range);
+      // certains serveurs aiment avoir un UA/Referer :
+      proxyReq.setHeader('user-agent', 'Mozilla/5.0');
+      proxyReq.setHeader('referer', 'https://watchparty-2.onrender.com/');
+    },
+  })
+);
+
+/* ---------- Démarrage HTTP ---------- */
 const server = app.listen(PORT, () => {
   console.log(`HTTP server running on port ${PORT}`);
 });
 
-// -------- WebSocket
+/* ---------- WebSocket /watchparty ---------- */
 const wss = new WebSocketServer({ server, path: '/watchparty' });
 
-// État par salle: lecture/temps/source
+/** État par salle : lecture/temps/source */
 const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, updatedAt, src } }
 
 function getOrCreateRoom(roomId) {
@@ -42,9 +57,7 @@ function getOrCreateRoom(roomId) {
 function broadcast(room, payload, except) {
   for (const client of room.clients) {
     if (client !== except && client.readyState === 1) {
-      try {
-        client.send(JSON.stringify(payload));
-      } catch {}
+      try { client.send(JSON.stringify(payload)); } catch {}
     }
   }
 }
@@ -84,13 +97,8 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
 
   ws.on('message', (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    if (['play', 'pause', 'seek', 'setSource'].includes(msg.type)) {
+    let msg; try { msg = JSON.parse(raw); } catch { return; }
+    if (['play','pause','seek','setSource'].includes(msg.type)) {
       applyAction(room, msg);
       broadcast(room, msg, ws);
     } else if (msg.type === 'syncRequest') {
@@ -101,10 +109,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     room.clients.delete(ws);
     if (room.clients.size === 0) {
-      setTimeout(() => {
-        if (room.clients.size === 0) rooms.delete(roomId);
-      }, 5 * 60 * 1000);
+      setTimeout(() => { if (room.clients.size === 0) rooms.delete(roomId); }, 5*60*1000);
     }
   });
 });
-
