@@ -7,34 +7,42 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* ---------- Helpers pour proxy vidéo ---------- */
+/* ---------- helpers ---------- */
 
 function addCommonHeaders(proxyReq, refererOrigin, req) {
   const range = req.headers['range'];
-  if (range) proxyReq.setHeader('range', range); // permettre le seek
+  if (range) proxyReq.setHeader('range', range);  // seek
   proxyReq.setHeader('user-agent', req.headers['user-agent'] || 'Mozilla/5.0');
-  // Certains serveurs exigent un referer sur leur propre domaine :
   if (refererOrigin) {
     proxyReq.setHeader('referer', refererOrigin.endsWith('/') ? refererOrigin : refererOrigin + '/');
   }
 }
 
-// Réécrit les redirections 30x pour rester derrière notre proxy
-function rewriteRedirectToProxy(proxyRes, baseOrigin) {
+// Réécriture 30x : on *écrase* le Location dans proxyRes **et** dans res
+function rewriteRedirectToProxy(proxyRes, req, res, baseOrigin) {
   const sc = proxyRes.statusCode || 0;
-  if ([301, 302, 303, 307, 308].includes(sc)) {
-    const loc = proxyRes.headers['location'];
-    if (loc) {
-      try {
-        const abs = new URL(loc, baseOrigin);
-        // Réécrire vers /proxy?u=<abs>
-        proxyRes.headers['location'] = '/proxy?u=' + encodeURIComponent(abs.toString());
-      } catch (_) { /* ignore */ }
-    }
+  if (![301,302,303,307,308].includes(sc)) return;
+
+  const loc = proxyRes.headers['location'];
+  if (!loc) return;
+
+  try {
+    const abs = new URL(loc, baseOrigin); // relative -> absolute
+    const proxied = '/proxy?u=' + encodeURIComponent(abs.toString());
+
+    // 1) muter le header sur la réponse upstream
+    proxyRes.headers['location'] = proxied;
+
+    // 2) s’assurer que le header envoyé au client est celui-ci
+    try { res.setHeader('location', proxied); } catch {}
+
+    // Parfois utile aussi :
+    res.statusCode = sc; // préserver le code (sinon Express peut forcer 200)
+  } catch {
+    // noop
   }
 }
 
-// Force un type vidéo si upstream renvoie octet-stream / nothing
 function ensureVideoContentType(proxyRes) {
   const ct = proxyRes.headers['content-type'] || '';
   if (!ct || /octet-stream/i.test(ct)) {
@@ -42,12 +50,11 @@ function ensureVideoContentType(proxyRes) {
   }
 }
 
-/* ---------- Statique + healthcheck ---------- */
+/* ---------- statique + healthcheck ---------- */
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-/* ---------- Proxy fixe: /video-remote (HTTP -> via HTTPS) ---------- */
-// Chemin de la vidéo "par défaut"
+/* ---------- /video-remote (URL fixe) ---------- */
 const FIXED_ORIGIN = 'http://vipvodle.top:8080';
 const FIXED_PATH   = '/movie/VOD0176173538414492/91735384144872/28620.mp4';
 
@@ -59,16 +66,15 @@ app.use(
     secure: false,
     pathRewrite: () => FIXED_PATH,
     onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, FIXED_ORIGIN, req),
-    onProxyRes: (proxyRes) => {
-      // si upstream renvoie 302, on garde la redirection via notre /proxy
-      rewriteRedirectToProxy(proxyRes, FIXED_ORIGIN);
+    onProxyRes: (proxyRes, req, res) => {
+      rewriteRedirectToProxy(proxyRes, req, res, FIXED_ORIGIN);
       ensureVideoContentType(proxyRes);
     },
     followRedirects: false
   })
 );
 
-/* ---------- Proxy dynamique: /proxy?u=<URL complète> ---------- */
+/* ---------- /proxy?u=<URL> (dynamique) ---------- */
 app.get('/proxy', (req, _res, next) => {
   console.log('GET /proxy called with u=', req.query.u);
   next();
@@ -89,19 +95,17 @@ app.use('/proxy', (req, res, next) => {
     target: targetOrigin,
     changeOrigin: true,
     secure: false,
-    // On remplace le chemin par celui de l'URL à proxifier
     pathRewrite: () => targetPathQS,
     onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, targetOrigin, req),
-    onProxyRes: (proxyRes) => {
-      // Réécrit les éventuelles redirections vers /proxy?u=...
-      rewriteRedirectToProxy(proxyRes, targetOrigin);
+    onProxyRes: (proxyRes, req, res) => {
+      rewriteRedirectToProxy(proxyRes, req, res, targetOrigin);
       ensureVideoContentType(proxyRes);
     },
     followRedirects: false
   })(req, res, next);
 });
 
-/* ---------- Démarrage HTTP ---------- */
+/* ---------- serveur HTTP ---------- */
 const server = app.listen(PORT, () => {
   console.log(`HTTP server running on port ${PORT}`);
 });
@@ -121,7 +125,7 @@ function getOrCreateRoom(roomId) {
   return rooms.get(roomId);
 }
 
-function broadcast(room, payload, except /* peut être null */) {
+function broadcast(room, payload, except) {
   for (const client of room.clients) {
     if (client.readyState !== 1) continue;
     if (except && client === except) continue;
@@ -139,7 +143,6 @@ function applyAction(room, action) {
     room.state.updatedAt = now;
     return;
   }
-
   if (action.type === 'seek') {
     room.state.time = action.time || 0;
     room.state.updatedAt = now;
@@ -167,13 +170,13 @@ wss.on('connection', (ws, req) => {
 
     if (msg.type === 'setSource') {
       applyAction(room, msg);
-      broadcast(room, msg, null); // notifier tout le monde
+      broadcast(room, msg, null);
       return;
     }
 
     if (['play','pause','seek'].includes(msg.type)) {
       applyAction(room, msg);
-      broadcast(room, msg, ws);    // exclure l’émetteur
+      broadcast(room, msg, ws);
     } else if (msg.type === 'syncRequest') {
       ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
     }
