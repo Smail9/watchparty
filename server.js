@@ -10,6 +10,10 @@ const PORT = process.env.PORT || 8080;
 /* ---------- Contenu statique + healthcheck ---------- */
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
+app.get('/proxy', (req, res, next) => {
+  console.log('GET /proxy called with u=', req.query.u);
+  next(); // on laisse passer au vrai middleware juste après
+});
 
 /* ---------- Proxy fixe: /video-remote -> URL HTTP (évite le mixed content) ---------- */
 /* Modifie pathRewrite si tu veux une autre vidéo par défaut */
@@ -143,3 +147,4 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+
