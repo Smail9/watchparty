@@ -1,0 +1,82 @@
+<!doctype html>
+if (Math.abs(player.currentTime - t) > 0.4) {
+player.currentTime = t;
+// Attendre le seek pour être sûr
+await new Promise(r => setTimeout(r, 0));
+}
+}
+
+
+async function applySync(state) {
+// Si la salle est en lecture, estime le temps écoulé depuis updatedAt
+let target = state.time;
+if (state.playing) {
+const drift = (Date.now() - state.updatedAt) / 1000; // ms -> s
+target += drift;
+}
+await setCurrentTime(target);
+if (state.playing && player.paused) {
+isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
+}
+if (!state.playing && !player.paused) {
+isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+}
+}
+
+
+// Écoute les actions locales et envoie au serveur
+player.addEventListener('play', () => {
+if (!ws || isRemoteUpdate) return;
+ws.send(JSON.stringify({ type: 'play', time: player.currentTime }));
+});
+player.addEventListener('pause', () => {
+if (!ws || isRemoteUpdate) return;
+ws.send(JSON.stringify({ type: 'pause', time: player.currentTime }));
+});
+player.addEventListener('seeking', () => {
+if (!ws) return;
+ws.send(JSON.stringify({ type: 'seek', time: player.currentTime }));
+});
+
+
+joinBtn.addEventListener('click', () => {
+const room = (roomInput.value || 'amis').trim();
+const nextURL = new URL(location.href);
+nextURL.searchParams.set('room', room);
+history.replaceState(null, '', nextURL.toString());
+connect(room);
+});
+
+
+copyBtn.addEventListener('click', async () => {
+const room = (roomInput.value || 'amis').trim();
+const link = new URL(location.href);
+link.searchParams.set('room', room);
+await navigator.clipboard.writeText(link.toString());
+copyBtn.textContent = 'Lien copié ✓';
+setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
+});
+
+
+syncBtn.addEventListener('click', () => {
+if (ws && ws.readyState === 1) {
+ws.send(JSON.stringify({ type: 'syncRequest' }));
+}
+});
+
+
+// Drag & drop / input fichier local pour tester vite
+filePicker.addEventListener('change', () => {
+const f = filePicker.files?.[0];
+if (f) {
+const url = URL.createObjectURL(f);
+player.src = url;
+}
+});
+
+
+// Auto-connexion à la salle de l'URL au chargement
+connect(initialRoom);
+</script>
+</body>
+</html>
