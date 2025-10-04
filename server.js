@@ -3,130 +3,81 @@ const express = require('express');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const fetch = require('node-fetch'); // v2.x
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* ---------- Statique + healthcheck ---------- */
+/* ----------------- Helpers proxy vidéo ----------------- */
+function addCommonHeaders(proxyReq, refererOrigin, req) {
+  const range = req.headers['range'];
+  if (range) proxyReq.setHeader('range', range);           // autoriser seek
+  proxyReq.setHeader('user-agent', req.headers['user-agent'] || 'Mozilla/5.0');
+  if (refererOrigin) {
+    proxyReq.setHeader('referer', refererOrigin.endsWith('/') ? refererOrigin : refererOrigin + '/');
+  }
+}
+
+function ensureVideoContentType(proxyRes) {
+  const ct = proxyRes.headers['content-type'] || '';
+  if (!ct || /octet-stream/i.test(ct)) {
+    proxyRes.headers['content-type'] = 'video/mp4';
+  }
+}
+
+/* ----------------- Statique + santé ----------------- */
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-/* ---------- Proxy générique /proxy?u=... ---------- */
+/* ----------------- /video-remote : URL fixe ----------------- */
+const FIXED_ORIGIN = 'http://vipvodle.top:8080';
+const FIXED_PATH   = '/movie/VOD0176173538414492/91735384144872/28620.mp4';
+
+app.use(
+  '/video-remote',
+  createProxyMiddleware({
+    target: FIXED_ORIGIN,
+    changeOrigin: true,
+    secure: false,                 // accepte upstream non certifié/auto-signé
+    followRedirects: true,         // *** suivre les 302 côté serveur ***
+    pathRewrite: () => FIXED_PATH,
+    onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, FIXED_ORIGIN, req),
+    onProxyRes: (proxyRes) => ensureVideoContentType(proxyRes),
+  })
+);
+
+/* ----------------- /proxy?u=<URL> : proxy dynamique ----------------- */
+app.get('/proxy', (req, _res, next) => { console.log('GET /proxy u=', req.query.u); next(); });
+
 app.use('/proxy', (req, res, next) => {
   const raw = req.query.u;
   if (!raw) return res.status(400).send('Missing u');
-  let u; try { u = new URL(raw); } catch { return res.status(400).send('Bad URL'); }
+
+  let targetURL;
+  try { targetURL = new URL(raw); }
+  catch { return res.status(400).send('Bad URL'); }
+
+  const targetOrigin = targetURL.origin;
+  const targetPathQS = targetURL.pathname + targetURL.search;
 
   return createProxyMiddleware({
-    target: u.origin,
+    target: targetOrigin,
     changeOrigin: true,
-    secure: false,
-    followRedirects: true,
-    pathRewrite: () => u.pathname + u.search,
-    onProxyReq: (proxyReq, req) => {
-      const range = req.headers['range'];
-      if (range) proxyReq.setHeader('range', range);
-      proxyReq.setHeader('user-agent', req.headers['user-agent'] || 'Mozilla/5.0');
-      proxyReq.setHeader('referer', 'https://' + req.headers.host + '/');
-    },
+    secure: false,                 // accepte https upstream "bizarre"
+    followRedirects: true,         // *** suivre les 302 côté serveur ***
+    pathRewrite: () => targetPathQS,
+    onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, targetOrigin, req),
+    onProxyRes: (proxyRes) => ensureVideoContentType(proxyRes),
   })(req, res, next);
 });
 
-/* ---------- HLS helper: /hls-avc?u=master.m3u8
-   Récupère la master playlist et redirige vers la sous-playlist H.264 (avc1)
-   S'il n'y a pas de STREAM-INF (donc url déjà variante), on renvoie vers /proxy?u=... tel quel. ---------- */
-app.get('/hls-avc', async (req, res) => {
-  const raw = req.query.u;
-  if (!raw) return res.status(400).send('Missing u');
-  let masterUrl; try { masterUrl = new URL(raw); } catch { return res.status(400).send('Bad URL'); }
-
-  try {
-    const r = await fetch(masterUrl.toString(), {
-      redirect: 'follow',
-      headers: {
-        'user-agent': 'Mozilla/5.0',
-        'accept': 'application/vnd.apple.mpegurl,text/plain;q=0.9,*/*;q=0.8',
-        'referer': 'https://' + req.headers.host + '/'
-      },
-    });
-    if (!r.ok) return res.status(502).send('Upstream error ' + r.status);
-    const text = await r.text();
-
-    if (!/^#EXTM3U/m.test(text)) {
-      // Pas une playlist HLS; renvoyer tel quel via proxy
-      return res.redirect(302, '/proxy?u=' + encodeURIComponent(masterUrl.toString()));
-    }
-
-    // Cherche des lignes STREAM-INF -> prend une avec avc1 si possible
-    const lines = text.split(/\r?\n/);
-    let bestAvc = null;
-    let bestAvcHeight = -1;
-
-    for (let i = 0; i < lines.length; i++) {
-      const L = lines[i];
-      if (L.startsWith('#EXT-X-STREAM-INF')) {
-        const codecsMatch = /CODECS="([^"]+)"/i.exec(L);
-        const resMatch = /RESOLUTION=\s*(\d+)x(\d+)/i.exec(L);
-        const next = (i + 1 < lines.length) ? lines[i + 1].trim() : null;
-
-        if (next && !next.startsWith('#')) {
-          const isAvc = codecsMatch && codecsMatch[1].toLowerCase().includes('avc1');
-          const height = resMatch ? parseInt(resMatch[1] ? resMatch[2] : resMatch[1], 10) : 0;
-          if (isAvc) {
-            if (height > bestAvcHeight) {
-              bestAvcHeight = height;
-              bestAvc = new URL(next, masterUrl).toString();
-            }
-          }
-        }
-      }
-    }
-
-    if (bestAvc) {
-      return res.redirect(302, '/proxy?u=' + encodeURIComponent(bestAvc));
-    } else {
-      // pas de STREAM-INF (variante) OU pas de avc1
-      // si pas de STREAM-INF, c’est une sous-playlist -> on la sert telle quelle via proxy
-      const hasStreamInf = /#EXT-X-STREAM-INF/i.test(text);
-      if (!hasStreamInf) {
-        return res.redirect(302, '/proxy?u=' + encodeURIComponent(masterUrl.toString()));
-      }
-      // master sans avc1 -> pas compatible
-      return res.status(406).send('no_avc_variant'); // le front affichera un message clair
-    }
-  } catch (e) {
-    console.error('[hls-avc] error', e);
-    return res.status(500).send('hls_avc_error');
-  }
-});
-
-/* ---------- Conversion simple TS -> "faux" HLS ---------- */
-app.get('/ts2m3u8', (req, res) => {
-  const raw = req.query.u;
-  if (!raw) return res.status(400).send('Missing u');
-  let abs; try { abs = new URL(raw); } catch { return res.status(400).send('Bad URL'); }
-  const prox = '/proxy?u=' + encodeURIComponent(abs.toString());
-  const body = [
-    '#EXTM3U',
-    '#EXT-X-VERSION:3',
-    '#EXT-X-PLAYLIST-TYPE:VOD',
-    '#EXT-X-TARGETDURATION:10',
-    '#EXT-X-MEDIA-SEQUENCE:0',
-    `#EXTINF:9.99,`,
-    prox,
-    '#EXT-X-ENDLIST'
-  ].join('\n');
-  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-  res.send(body);
-});
-
-/* ---------- WebSocket /watchparty ---------- */
+/* ----------------- HTTP server ----------------- */
 const server = app.listen(PORT, () => {
   console.log(`HTTP server running on port ${PORT}`);
 });
 
+/* ----------------- WebSocket /watchparty ----------------- */
 const wss = new WebSocketServer({ server, path: '/watchparty' });
+
 const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, updatedAt, src } }
 
 function getOrCreateRoom(roomId) {
@@ -138,13 +89,15 @@ function getOrCreateRoom(roomId) {
   }
   return rooms.get(roomId);
 }
+
 function broadcast(room, payload, except) {
-  for (const client of room.clients) {
-    if (client.readyState !== 1) continue;
-    if (except && client === except) continue;
-    try { client.send(JSON.stringify(payload)); } catch {}
+  for (const c of room.clients) {
+    if (c.readyState !== 1) continue;
+    if (except && c === except) continue;
+    try { c.send(JSON.stringify(payload)); } catch {}
   }
 }
+
 function applyAction(room, action) {
   const now = Date.now();
   if (action.type === 'setSource') {
@@ -167,6 +120,7 @@ function applyAction(room, action) {
     room.state.updatedAt = now;
   }
 }
+
 wss.on('connection', (ws, req) => {
   const params = new URLSearchParams(req.url.split('?')[1] || '');
   const roomId = params.get('room') || 'default';
@@ -175,12 +129,16 @@ wss.on('connection', (ws, req) => {
 
   ws.send(JSON.stringify({ type: 'syncState', state: room.state }));
 
-  ws.on('message', raw => {
+  ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
+
     if (msg.type === 'setSource') {
       applyAction(room, msg);
       broadcast(room, msg, null);
-    } else if (['play','pause','seek'].includes(msg.type)) {
+      return;
+    }
+
+    if (['play','pause','seek'].includes(msg.type)) {
       applyAction(room, msg);
       broadcast(room, msg, ws);
     } else if (msg.type === 'syncRequest') {
@@ -191,7 +149,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     room.clients.delete(ws);
     if (room.clients.size === 0) {
-      setTimeout(() => { if (room.clients.size === 0) rooms.delete(roomId); }, 5 * 60 * 1000);
+      setTimeout(() => { if (room.clients.size === 0) rooms.delete(roomId); }, 5*60*1000);
     }
   });
 });
