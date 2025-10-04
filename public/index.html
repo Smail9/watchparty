@@ -5,12 +5,50 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Watch Party</title>
   <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}
+    :root{
+      --gap:12px;
+    }
+    *{box-sizing:border-box}
+    body{
+      font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
+      margin:0;padding:24px;background:#fff;color:#111
+    }
     .wrap{max-width:900px;margin:0 auto}
-    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
-    video{width:100%;max-height:70vh;background:#000;border-radius:12px}
-    input,button{padding:8px 12px;border:1px solid #ccc;border-radius:10px}
+    h1{margin:0 0 16px 0}
+    .row{
+      display:flex;gap:var(--gap);align-items:center;flex-wrap:wrap;margin:12px 0
+    }
+    input,button{
+      padding:8px 12px;border:1px solid #ccc;border-radius:10px;background:#fff
+    }
     button{cursor:pointer}
+    input[type="url"], input[type="text"]{min-width:260px}
+
+    /* === Lecteur responsive === */
+    .player-wrap{
+      --player-ratio: 16/9;   /* ratio par défaut avant metadata */
+      --fit: contain;         /* contain = adapter, cover = plein écran (crop) */
+      width:100%;
+      aspect-ratio: var(--player-ratio);
+      background:#000;
+      border-radius:12px;
+      overflow:hidden;
+      /* hauteur max fiable sur mobile */
+      max-height: min(70svh, 80vh);
+      box-shadow: 0 2px 12px rgba(0,0,0,.08);
+    }
+    .player-wrap video{
+      width:100%;
+      height:100%;
+      object-fit: var(--fit);
+      display:block;
+      background:#000;
+    }
+    .note{font-size:.9rem;color:#666}
+    @media (max-width:600px){
+      body{padding:16px}
+      .row input, .row button{flex:1 0 auto}
+    }
   </style>
 </head>
 <body>
@@ -19,72 +57,260 @@
 
     <!-- Salle -->
     <div class="row">
-      <span>Salle :</span>
+      <label for="roomInput">Salle :</label>
       <input id="roomInput" type="text" placeholder="amis" />
       <button id="joinBtn">Créer/Rejoindre</button>
       <button id="copyBtn">Copier le lien d'invitation</button>
     </div>
 
-    <!-- Source commune -->
+    <!-- Source distante -->
     <div class="row">
-      <!-- Tu peux taper: /video-remote OU /proxy?u=http://... OU un https:// direct -->
-      <input id="srcInput" type="url" placeholder="/video-remote ou /proxy?u=http://..." style="min-width:420px" />
+      <input id="srcInput" type="url"
+             placeholder="Colle une URL .mp4, ou /proxy?u=..., ou /video-remote"
+             style="flex:1 0 320px" />
       <button id="setSrcBtn">Définir la vidéo pour tous</button>
     </div>
 
-    <video id="player" controls preload="metadata">
-      <!-- Par défaut: proxy fixe -->
-      <source src="/video-remote" type="video/mp4" />
-    </video>
+    <!-- Lecteur -->
+    <div class="player-wrap" id="playerWrap">
+      <video id="player" controls preload="metadata" playsinline>
+        <source src="/video-remote" type="video/mp4">
+      </video>
+    </div>
 
+    <!-- Actions -->
     <div class="row">
       <input type="file" id="filePicker" accept="video/*" />
       <button id="syncBtn">Me recaler</button>
+      <button id="fitToggle">Plein écran (crop)</button>
     </div>
+
+    <p class="note">
+      Astuce : pour partager une vidéo HTTP/302/token, utilise
+      <code>/proxy?u=URL-complète</code>. Les redirections sont suivies côté serveur.
+    </p>
   </div>
 
   <script>
-  let hls = null;
+    /* -------------------- Sélecteurs -------------------- */
+    const player     = document.getElementById('player');
+    const playerWrap = document.getElementById('playerWrap');
+    const roomInput  = document.getElementById('roomInput');
+    const joinBtn    = document.getElementById('joinBtn');
+    const copyBtn    = document.getElementById('copyBtn');
+    const filePicker = document.getElementById('filePicker');
+    const syncBtn    = document.getElementById('syncBtn');
+    const srcInput   = document.getElementById('srcInput');
+    const setSrcBtn  = document.getElementById('setSrcBtn');
+    const fitToggle  = document.getElementById('fitToggle');
 
-  function destroyHls() {
-    if (hls) { try { hls.destroy(); } catch(_){} hls = null; }
-  }
+    /* -------------------- Salle initiale -------------------- */
+    const urlParams = new URLSearchParams(location.search);
+    const initialRoom = urlParams.get('room') || 'amis';
+    roomInput.value = initialRoom;
 
-  function setPlayerSource(src, autoplay = false) {
-    if (!src) return;
-    console.log('Set player src ->', src);
+    /* -------------------- WebSocket -------------------- */
+    let ws = null;
+    let isRemoteUpdate = false;
 
-    destroyHls();
-
-    // HLS (m3u8)
-    if (src.endsWith('.m3u8')) {
-      if (window.Hls && Hls.isSupported()) {
-        hls = new Hls({ enableWorker: true });
-        hls.loadSource(src);
-        hls.attachMedia(player);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => { if (autoplay) player.play().catch(()=>{}); });
-      } else if (player.canPlayType('application/vnd.apple.mpegURL')) {
-        // Safari natif HLS
-        player.src = src;
-        player.addEventListener('loadedmetadata', () => { if (autoplay) player.play().catch(()=>{}); }, { once: true });
-      } else {
-        alert("Ce navigateur ne supporte pas HLS et hls.js indisponible.");
-      }
-      return;
+    function wsURL(room) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
     }
 
-    // MP4 / autre
-    player.pause();
-    player.removeAttribute('src');
-    player.load();
-    player.src = src;
-    player.load();
-    if (autoplay) player.play().catch(()=>{});
-  }
+    function connect(room) {
+      if (ws) { try { ws.close(); } catch(_){} }
+      ws = new WebSocket(wsURL(room));
 
-  // Pense à détruire hls quand tu quittes la page
-  window.addEventListener('beforeunload', destroyHls);
-</script>
+      ws.onopen   = () => console.log('WS open:', ws.url);
+      ws.onclose  = () => console.log('WS closed');
+      ws.onerror  = (e) => console.error('WS error:', e);
 
+      ws.onmessage = async (ev) => {
+        let msg; try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
+        console.log('WS message:', msg);
+
+        if (msg.type === 'syncState' && msg.state) {
+          await applySyncState(msg.state);
+        } else if (msg.type === 'setSource') {
+          setPlayerSource(msg.src, /*autoplay*/false);
+        } else if (msg.type === 'play') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; await player.play(); isRemoteUpdate = false;
+        } else if (msg.type === 'pause') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+        } else if (msg.type === 'seek') {
+          await setCurrentTime(msg.time || 0);
+        }
+      };
+    }
+
+    /* -------------------- Aspect ratio & fit -------------------- */
+    function updateAspectFromVideo(){
+      const vw = player.videoWidth || 16;
+      const vh = player.videoHeight || 9;
+      playerWrap.style.setProperty('--player-ratio', vw / vh);
+    }
+    player.addEventListener('loadedmetadata', updateAspectFromVideo);
+    player.addEventListener('loadeddata',     updateAspectFromVideo);
+
+    function currentFit(){
+      const cs = getComputedStyle(playerWrap).getPropertyValue('--fit').trim();
+      return cs || 'contain';
+    }
+    function applyFit(next){
+      playerWrap.style.setProperty('--fit', next);
+      fitToggle.textContent = (next === 'cover')
+        ? 'Adapter (bords noirs)'
+        : 'Plein écran (crop)';
+    }
+    // état initial : adapter (bords noirs)
+    applyFit('contain');
+    fitToggle.addEventListener('click', ()=>{
+      applyFit(currentFit() === 'contain' ? 'cover' : 'contain');
+    });
+
+    /* -------------------- Player utils -------------------- */
+    function normalizeSrc(input) {
+      let s = (input || '').trim();
+      if (!s) return '';
+
+      // /proxy?u=... déjà prêt
+      if (s.startsWith('/proxy?u=')) return s;
+
+      // http(s) => on force le proxy
+      if (/^https?:\/\//i.test(s)) {
+        try { new URL(s); return '/proxy?u=' + encodeURIComponent(s); }
+        catch { return s; }
+      }
+
+      // /video-remote ou chemin local accepté tel quel
+      if (s.startsWith('/')) return s;
+
+      // sinon on renvoie brut (ex: blob: ou file local ne marche que localement)
+      return s;
+    }
+
+    function setPlayerSource(src, autoplay=false) {
+      if (!src) return;
+      console.log('Set player src ->', src);
+      if (player.src !== location.origin + src && !src.startsWith('blob:')) {
+        player.src = src;
+      } else {
+        // si même URL, reload pour actualiser
+        player.load();
+      }
+      // on laisse le contrôle à la salle pour play/pause
+      if (autoplay) { player.play().catch(()=>{}); }
+    }
+
+    function playerCurrentSrc() {
+      try {
+        const u = new URL(player.currentSrc || player.src);
+        return u.pathname + u.search;
+      } catch { return player.currentSrc || player.src || ''; }
+    }
+
+    async function setCurrentTime(t) {
+      if (Math.abs(player.currentTime - t) > 0.4) {
+        player.currentTime = t;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+
+    async function applySyncState(state) {
+      // 1) source
+      if (state.src) {
+        const cur = playerCurrentSrc();
+        if (cur !== state.src) {
+          setPlayerSource(state.src);
+        }
+      }
+      // 2) temps
+      let target = state.time || 0;
+      if (state.playing) {
+        const drift = (Date.now() - state.updatedAt) / 1000;
+        target += drift;
+      }
+      await setCurrentTime(target);
+
+      // 3) play/pause
+      if (state.playing && player.paused) {
+        isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
+      }
+      if (!state.playing && !player.paused) {
+        isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+      }
+    }
+
+    /* -------------------- Écoute événements locaux -------------------- */
+    player.addEventListener('play', () => {
+      if (!ws || isRemoteUpdate) return;
+      ws.send(JSON.stringify({ type: 'play', time: player.currentTime }));
+    });
+    player.addEventListener('pause', () => {
+      if (!ws || isRemoteUpdate) return;
+      ws.send(JSON.stringify({ type: 'pause', time: player.currentTime }));
+    });
+    player.addEventListener('seeking', () => {
+      if (!ws) return;
+      ws.send(JSON.stringify({ type: 'seek', time: player.currentTime }));
+    });
+    player.addEventListener('error', (e)=>{
+      console.warn('[video] error src=', player.currentSrc || player.src, 'err=', player.error?.code);
+    });
+
+    /* -------------------- UI : salle -------------------- */
+    joinBtn.addEventListener('click', () => {
+      const room = (roomInput.value || 'amis').trim();
+      const nextURL = new URL(location.href);
+      nextURL.searchParams.set('room', room);
+      history.replaceState(null, '', nextURL.toString());
+      connect(room);
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      const room = (roomInput.value || 'amis').trim();
+      const link = new URL(location.href);
+      link.searchParams.set('room', room);
+      await navigator.clipboard.writeText(link.toString());
+      copyBtn.textContent = 'Lien copié ✓';
+      setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
+    });
+
+    /* -------------------- UI : source partagée -------------------- */
+    setSrcBtn.addEventListener('click', () => {
+      const raw = srcInput.value.trim();
+      const normalized = normalizeSrc(raw);
+      console.log('setSrc click → raw:', raw, '→ normalized:', normalized);
+      if (!normalized) return;
+
+      setPlayerSource(normalized); // on se met à jour localement
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'setSource', src: normalized }));
+      }
+    });
+
+    /* -------------------- UI : Sync -------------------- */
+    syncBtn.addEventListener('click', () => {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'syncRequest' }));
+      }
+    });
+
+    /* -------------------- Fichier local (local seulement) -------------------- */
+    filePicker.addEventListener('change', () => {
+      const f = filePicker.files?.[0];
+      if (f) {
+        const url = URL.createObjectURL(f);
+        setPlayerSource(url, true); // lecture locale immédiate
+        console.log('Local file loaded:', f.name);
+      }
+    });
+
+    /* -------------------- Connexion initiale -------------------- */
+    connect(initialRoom);
+  </script>
 </body>
 </html>
