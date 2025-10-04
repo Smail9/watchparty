@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Watch Party</title>
-  <!-- hls.js pour .m3u8 (et .ts via /ts2m3u8) -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     :root{ --gap:12px; }
@@ -16,10 +15,9 @@
     button{ cursor:pointer }
     input[type="url"], input[type="text"]{ min-width:260px }
 
-    /* Lecteur responsive */
     .player-wrap{
-      --player-ratio: 16/9;   /* ratio par défaut avant metadata */
-      --fit: contain;         /* contain=adapter, cover=plein écran (crop) */
+      --player-ratio: 16/9;   /* ratio par défaut */
+      --fit: contain;         /* contain = adapter ; cover = crop plein écran */
       position: relative;
       width:100%;
       aspect-ratio: var(--player-ratio);
@@ -43,7 +41,6 @@
   <div class="wrap">
     <h1>Watch Party</h1>
 
-    <!-- Salle -->
     <div class="row">
       <label for="roomInput">Salle :</label>
       <input id="roomInput" type="text" placeholder="amis" />
@@ -51,13 +48,11 @@
       <button id="copyBtn">Copier le lien d'invitation</button>
     </div>
 
-    <!-- Source -->
     <div class="row">
-      <input id="srcInput" type="url" placeholder="Colle .mp4 / .m3u8 / .ts (ou /proxy?u=... / /ts2m3u8?u=...)" style="flex:1 0 320px" />
+      <input id="srcInput" type="url" placeholder="Colle .mp4 / .m3u8 / .ts (ou /proxy?u=… / /ts2m3u8?u=…)" style="flex:1 0 320px" />
       <button id="setSrcBtn">Définir la vidéo pour tous</button>
     </div>
 
-    <!-- Lecteur -->
     <div class="player-wrap" id="playerWrap">
       <video id="player" controls preload="metadata" playsinline>
         <source src="/video-remote" type="video/mp4" />
@@ -73,7 +68,6 @@
   </div>
 
   <script>
-    /* ---------- Sélecteurs ---------- */
     const player     = document.getElementById('player');
     const playerWrap = document.getElementById('playerWrap');
     const roomInput  = document.getElementById('roomInput');
@@ -86,237 +80,159 @@
     const fitToggle  = document.getElementById('fitToggle');
     const fsBtn      = document.getElementById('fsBtn');
 
-    /* ---------- Salle initiale ---------- */
     const urlParams = new URLSearchParams(location.search);
     const initialRoom = urlParams.get('room') || 'amis';
     roomInput.value = initialRoom;
 
-    /* ---------- WebSocket ---------- */
-    let ws = null;
-    let isRemoteUpdate = false;
-    function wsURL(room) {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
-    }
-    function connect(room) {
-      if (ws) { try { ws.close(); } catch(_){} }
+    let ws = null, isRemoteUpdate = false, hls = null;
+
+    function wsURL(room){ const proto = location.protocol === 'https:' ? 'wss' : 'ws'; return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`; }
+    function connect(room){
+      if (ws) try { ws.close(); } catch(_){}
       ws = new WebSocket(wsURL(room));
-      ws.onopen  = () => console.log('WS open:', ws.url);
-      ws.onclose = () => console.log('WS closed');
-      ws.onerror = (e) => console.error('WS error:', e);
-      ws.onmessage = async (ev) => {
-        let msg; try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
-        if (msg.type === 'syncState' && msg.state) {
-          await applySyncState(msg.state);
-        } else if (msg.type === 'setSource') {
-          setPlayerSource(msg.src, /*autoplay*/false);
-        } else if (msg.type === 'play') {
-          await setCurrentTime(msg.time || 0);
-          isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
-        } else if (msg.type === 'pause') {
-          await setCurrentTime(msg.time || 0);
-          isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
-        } else if (msg.type === 'seek') {
-          await setCurrentTime(msg.time || 0);
-        }
+      ws.onmessage = async ev => {
+        let msg; try { msg = JSON.parse(ev.data||'{}'); } catch { return; }
+        if (msg.type === 'syncState' && msg.state) applySyncState(msg.state);
+        else if (msg.type === 'setSource') setPlayerSource(msg.src, false);
+        else if (msg.type === 'play')  { await setCurrentTime(msg.time||0); isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false; }
+        else if (msg.type === 'pause') { await setCurrentTime(msg.time||0); isRemoteUpdate = true; player.pause(); isRemoteUpdate = false; }
+        else if (msg.type === 'seek')  { await setCurrentTime(msg.time||0); }
       };
     }
 
-    /* ---------- Aspect ratio + fit ---------- */
-    function updateAspectFromVideo(){
-      const vw = player.videoWidth || 16, vh = player.videoHeight || 9;
-      playerWrap.style.setProperty('--player-ratio', vw / vh);
-    }
-    player.addEventListener('loadedmetadata', updateAspectFromVideo);
-    player.addEventListener('loadeddata',     updateAspectFromVideo);
+    function updateAspect(){ const vw = player.videoWidth||16, vh=player.videoHeight||9; playerWrap.style.setProperty('--player-ratio', vw/vh); }
+    player.addEventListener('loadedmetadata', updateAspect);
+    player.addEventListener('loadeddata',     updateAspect);
 
-    function currentFit(){
-      const cs = getComputedStyle(playerWrap).getPropertyValue('--fit').trim();
-      return cs || 'contain';
-    }
-    function applyFit(next){
-      playerWrap.style.setProperty('--fit', next);
-      fitToggle.textContent = (next === 'cover') ? 'Adapter (bords noirs)' : 'Plein écran (crop)';
-    }
+    function currentFit(){ return (getComputedStyle(playerWrap).getPropertyValue('--fit').trim() || 'contain'); }
+    function applyFit(next){ playerWrap.style.setProperty('--fit', next); fitToggle.textContent = (next==='cover')?'Adapter (bords noirs)':'Plein écran (crop)'; }
     applyFit('contain');
-    fitToggle.addEventListener('click', ()=> applyFit(currentFit()==='contain' ? 'cover' : 'contain'));
+    fitToggle.addEventListener('click', ()=> applyFit(currentFit()==='contain'?'cover':'contain'));
 
-    // Plein écran natif
-    const enterFS = el => (el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen)?.call(el);
-    const exitFS  = () => (document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen)?.call(document);
-    fsBtn.addEventListener('click', () => { document.fullscreenElement ? exitFS() : enterFS(playerWrap); });
-    document.addEventListener('fullscreenchange', () => { fsBtn.textContent = document.fullscreenElement ? 'Quitter plein écran' : 'Plein écran'; });
+    const enterFS = el => (el.requestFullscreen||el.webkitRequestFullscreen||el.msRequestFullscreen)?.call(el);
+    const exitFS  = () => (document.exitFullscreen||document.webkitExitFullscreen||document.msExitFullscreen)?.call(document);
+    fsBtn.addEventListener('click', ()=> document.fullscreenElement?exitFS():enterFS(playerWrap));
+    document.addEventListener('fullscreenchange', ()=> fsBtn.textContent = document.fullscreenElement?'Quitter plein écran':'Plein écran');
 
-    /* ---------- HLS via proxy: loader perso ---------- */
-    class ProxyLoader extends (window.Hls ? Hls.DefaultConfig.loader : Function) {
-      constructor(config) { super(config); }
-      load(context, config, callbacks) {
-        const u = context.url || '';
+    class ProxyLoader extends (window.Hls?Hls.DefaultConfig.loader:Function){
+      constructor(c){ super(c); }
+      load(ctx,cfg,cb){
+        const u = ctx.url||'';
         if (u && !u.startsWith('/proxy?u=')) {
-          if (/^https?:\/\//i.test(u)) {
-            context.url = '/proxy?u=' + encodeURIComponent(u);
-          }
-          // blob:, data:, ou déjà proxifié -> on laisse
+          if (/^https?:\/\//i.test(u)) ctx.url = '/proxy?u=' + encodeURIComponent(u);
         }
-        return super.load(context, config, callbacks);
+        return super.load(ctx,cfg,cb);
       }
     }
 
-    /* ---------- Choix automatique d’un niveau H.264 (avc1) ---------- */
-    function pickAvcLevel(hls) {
-      if (!hls || !hls.levels || !hls.levels.length) return -1;
-      for (let i = 0; i < hls.levels.length; i++) {
-        const L = hls.levels[i];
-        const vc = (L.videoCodec || '').toLowerCase();
-        const cd = (L.attrs && L.attrs.CODECS ? String(L.attrs.CODECS) : '').toLowerCase();
-        if (vc.includes('avc1') || cd.includes('avc1')) return i;
-      }
-      return -1;
-    }
-
-    /* ---------- Player utils (normalize + setSource) ---------- */
-    let hls = null;
     function destroyHls(){ if (hls) { try { hls.destroy(); } catch(_){} hls = null; } }
 
-    function normalizeSrc(input) {
-      let s = (input || '').trim();
+    function normalizeSrc(input){
+      let s = (input||'').trim();
       if (!s) return '';
 
-      // .ts isolé -> wrapper HLS
+      // .ts -> wrapper HLS
       if (/\.ts(\?|$)/i.test(s)) {
-        if (/^https?:\/\//i.test(s)) s = '/ts2m3u8?u=' + encodeURIComponent(s);
-        else if (s.startsWith('/proxy?u=')) { const raw = s.slice(9); s = '/ts2m3u8?u=' + raw; }
-        else if (s.startsWith('/')) { const abs = new URL(s, location.origin).toString(); s = '/ts2m3u8?u=' + encodeURIComponent(abs); }
+        if (/^https?:\/\//i.test(s)) return '/ts2m3u8?u=' + encodeURIComponent(s);
+        if (s.startsWith('/proxy?u=')) return '/ts2m3u8?u=' + s.slice(9);
+        if (s.startsWith('/')) return '/ts2m3u8?u=' + encodeURIComponent(new URL(s, location.origin).toString());
       }
 
-      // .m3u8 : passer par proxy si http/https
+      // .m3u8 -> passer par le détecteur serveur /hls-avc
       if (/\.m3u8(\?|$)/i.test(s)) {
-        if (/^https?:\/\//i.test(s)) s = '/proxy?u=' + encodeURIComponent(s);
+        if (/^https?:\/\//i.test(s)) return '/hls-avc?u=' + encodeURIComponent(s);
+        if (s.startsWith('/proxy?u=')) return '/hls-avc?u=' + s.slice(9);
       }
 
-      // .mp4 http -> proxy
+      // mp4 http -> proxy
       if (/\.mp4(\?|$)/i.test(s) && /^http:\/\//i.test(s)) {
-        s = '/proxy?u=' + encodeURIComponent(s);
+        return '/proxy?u=' + encodeURIComponent(s);
       }
-
       return s;
     }
 
-    function setPlayerSource(src, autoplay=false) {
+    function setPlayerSource(src, autoplay=false){
       if (!src) return;
-      console.log('Set player src ->', src);
-
       destroyHls();
 
-      // ----- HLS (.m3u8) -----
+      // HLS
       if (/\.m3u8(\?|$)/i.test(src)) {
-        // Si src = /proxy?u=..., on redonne l’URL ORIGINALE à hls.js (ProxyLoader re-proxifie tout)
         let source = src;
         const m = /^\/proxy\?u=(.+)$/.exec(src);
         if (m) { try { source = decodeURIComponent(m[1]); } catch { source = m[1]; } }
 
         if (window.Hls && Hls.isSupported()) {
-          hls = new Hls({ enableWorker: true, loader: ProxyLoader });
-
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            const avcLevel = pickAvcLevel(hls);
-            if (avcLevel >= 0) {
-              console.log('[HLS] AVC level found, switching to level', avcLevel);
-              hls.currentLevel = avcLevel; // force la variante H.264
-            } else {
-              console.warn('[HLS] Aucun level H.264/AVC. Probable HEVC/H.265 → pas d’image sur Chrome/Firefox.');
-              alert("Ce flux semble en HEVC/H.265 (ou non supporté). Essayez Safari ou trouvez une variante H.264 (AVC).");
-            }
-            if (autoplay) player.play().catch(()=>{});
-          });
-
-          hls.on(Hls.Events.ERROR, (evt, data) => {
-            console.warn('HLS error:', data.type, data.details, data.fatal);
-            if (data.fatal && data.type === 'mediaError') hls.recoverMediaError();
-          });
-
+          hls = new Hls({ enableWorker:true, loader: ProxyLoader });
+          hls.on(Hls.Events.MANIFEST_PARSED, ()=> { if (autoplay) player.play().catch(()=>{}); });
+          hls.on(Hls.Events.ERROR, (e,d)=>{ if (d.fatal && d.type==='mediaError') hls.recoverMediaError(); });
           hls.loadSource(source);
           hls.attachMedia(player);
         } else {
-          // Safari natif (risque CORS si segments non proxifiés)
           player.src = src;
-          player.addEventListener('loadedmetadata', () => { if (autoplay) player.play().catch(()=>{}); }, { once: true });
+          player.addEventListener('loadedmetadata', ()=> { if (autoplay) player.play().catch(()=>{}); }, { once:true });
         }
         return;
       }
 
-      // ----- MP4 / autre -----
+      // MP4 / autre
       player.pause();
-      player.removeAttribute('src');
-      player.load();
-      player.src = src;
-      player.load();
+      player.removeAttribute('src'); player.load();
+      player.src = src; player.load();
       if (autoplay) player.play().catch(()=>{});
     }
 
-    function playerCurrentSrc() {
+    function currentSrc(){
       try { const u = new URL(player.currentSrc || player.src); return u.pathname + u.search; }
       catch { return player.currentSrc || player.src || ''; }
     }
-
-    async function setCurrentTime(t) {
-      if (Math.abs(player.currentTime - t) > 0.4) {
-        player.currentTime = t; await new Promise(r => setTimeout(r, 0));
-      }
-    }
-
-    async function applySyncState(state) {
-      if (state.src) {
-        const cur = playerCurrentSrc();
-        if (cur !== state.src) setPlayerSource(state.src);
-      }
-      let target = state.time || 0;
-      if (state.playing) target += (Date.now() - state.updatedAt) / 1000;
+    async function setCurrentTime(t){ if (Math.abs(player.currentTime - t) > 0.4){ player.currentTime = t; await new Promise(r=>setTimeout(r,0)); } }
+    async function applySyncState(state){
+      if (state.src && currentSrc() !== state.src) setPlayerSource(state.src);
+      let target = state.time||0; if (state.playing) target += (Date.now()-state.updatedAt)/1000;
       await setCurrentTime(target);
-
-      if (state.playing && player.paused) { isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false; }
-      if (!state.playing && !player.paused) { isRemoteUpdate = true; player.pause(); isRemoteUpdate = false; }
+      if (state.playing && player.paused){ isRemoteUpdate=true; await player.play().catch(()=>{}); isRemoteUpdate=false; }
+      if (!state.playing && !player.paused){ isRemoteUpdate=true; player.pause(); isRemoteUpdate=false; }
     }
 
-    /* ---------- Événements locaux ---------- */
-    player.addEventListener('play',   () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play',  time: player.currentTime })); });
-    player.addEventListener('pause',  () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time: player.currentTime })); });
-    player.addEventListener('seeking',() => { if (!ws) return; ws.send(JSON.stringify({ type:'seek',   time: player.currentTime })); });
-    player.addEventListener('error',  () => { console.warn('[video] error', player.error?.code, 'src=', player.currentSrc || player.src); });
+    player.addEventListener('play',   ()=> { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play',  time:player.currentTime })); });
+    player.addEventListener('pause',  ()=> { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time:player.currentTime })); });
+    player.addEventListener('seeking',()=> { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time:player.currentTime })); });
 
-    /* ---------- UI ---------- */
-    setSrcBtn.addEventListener('click', () => {
+    setSrcBtn.addEventListener('click', async ()=>{
       const raw = srcInput.value.trim();
       const normalized = normalizeSrc(raw);
       if (!normalized) return;
-      setPlayerSource(normalized);                           // local
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'setSource', src: normalized })); // broadcast
+
+      // si on passe par /hls-avc et qu'il n'y a PAS d’AVC, le serveur renverra 406
+      if (normalized.startsWith('/hls-avc')) {
+        const head = await fetch(normalized, { method:'HEAD' });
+        if (head.status === 406) {
+          alert("Ce flux ne propose aucune variante H.264 (AVC). Essayez Safari ou cherchez une source AVC.");
+          return;
+        }
+      }
+      setPlayerSource(normalized);
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'setSource', src: normalized }));
     });
 
-    joinBtn.addEventListener('click', () => {
-      const room = (roomInput.value || 'amis').trim();
-      const nextURL = new URL(location.href);
-      nextURL.searchParams.set('room', room);
-      history.replaceState(null, '', nextURL.toString());
-      connect(room);
+    joinBtn.addEventListener('click', ()=>{
+      const room = (roomInput.value||'amis').trim();
+      const nextURL = new URL(location.href); nextURL.searchParams.set('room', room);
+      history.replaceState(null,'',nextURL.toString()); connect(room);
     });
-
-    copyBtn.addEventListener('click', async () => {
-      const room = (roomInput.value || 'amis').trim();
+    copyBtn.addEventListener('click', async ()=>{
+      const room = (roomInput.value||'amis').trim();
       const link = new URL(location.href); link.searchParams.set('room', room);
       await navigator.clipboard.writeText(link.toString());
-      copyBtn.textContent = 'Lien copié ✓';
-      setTimeout(()=> copyBtn.textContent = 'Copier le lien d\'invitation', 1600);
+      copyBtn.textContent = 'Lien copié ✓'; setTimeout(()=> copyBtn.textContent='Copier le lien d\'invitation',1600);
     });
+    syncBtn.addEventListener('click', ()=> { if (ws && ws.readyState===1) ws.send(JSON.stringify({ type:'syncRequest' })); });
 
-    syncBtn.addEventListener('click', () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'syncRequest' })); });
-
-    filePicker.addEventListener('change', () => {
+    filePicker.addEventListener('change', ()=>{
       const f = filePicker.files?.[0];
-      if (f) { const url = URL.createObjectURL(f); setPlayerSource(url, true); console.log('Local file:', f.name); }
+      if (f){ const url = URL.createObjectURL(f); setPlayerSource(url, true); }
     });
 
-    /* ---------- Go ---------- */
     connect(initialRoom);
   </script>
 </body>
