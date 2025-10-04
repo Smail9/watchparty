@@ -7,16 +7,15 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* ----------------- Helpers proxy vidéo ----------------- */
+/* Helpers */
 function addCommonHeaders(proxyReq, refererOrigin, req) {
   const range = req.headers['range'];
-  if (range) proxyReq.setHeader('range', range);           // autoriser seek
+  if (range) proxyReq.setHeader('range', range);
   proxyReq.setHeader('user-agent', req.headers['user-agent'] || 'Mozilla/5.0');
   if (refererOrigin) {
     proxyReq.setHeader('referer', refererOrigin.endsWith('/') ? refererOrigin : refererOrigin + '/');
   }
 }
-
 function ensureVideoContentType(proxyRes) {
   const ct = proxyRes.headers['content-type'] || '';
   if (!ct || /octet-stream/i.test(ct)) {
@@ -24,11 +23,11 @@ function ensureVideoContentType(proxyRes) {
   }
 }
 
-/* ----------------- Statique + santé ----------------- */
+/* Statique + santé */
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-/* ----------------- /video-remote : URL fixe ----------------- */
+/* /video-remote : URL fixe */
 const FIXED_ORIGIN = 'http://vipvodle.top:8080';
 const FIXED_PATH   = '/movie/VOD0176173538414492/91735384144872/28620.mp4';
 
@@ -37,15 +36,15 @@ app.use(
   createProxyMiddleware({
     target: FIXED_ORIGIN,
     changeOrigin: true,
-    secure: false,                 // accepte upstream non certifié/auto-signé
-    followRedirects: true,         // *** suivre les 302 côté serveur ***
+    secure: false,
+    followRedirects: true,      // suit 302 côté serveur
     pathRewrite: () => FIXED_PATH,
     onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, FIXED_ORIGIN, req),
     onProxyRes: (proxyRes) => ensureVideoContentType(proxyRes),
   })
 );
 
-/* ----------------- /proxy?u=<URL> : proxy dynamique ----------------- */
+/* /proxy?u=... : dynamique */
 app.get('/proxy', (req, _res, next) => { console.log('GET /proxy u=', req.query.u); next(); });
 
 app.use('/proxy', (req, res, next) => {
@@ -62,22 +61,21 @@ app.use('/proxy', (req, res, next) => {
   return createProxyMiddleware({
     target: targetOrigin,
     changeOrigin: true,
-    secure: false,                 // accepte https upstream "bizarre"
-    followRedirects: true,         // *** suivre les 302 côté serveur ***
+    secure: false,
+    followRedirects: true,      // suit 302 côté serveur
     pathRewrite: () => targetPathQS,
     onProxyReq: (proxyReq, req) => addCommonHeaders(proxyReq, targetOrigin, req),
     onProxyRes: (proxyRes) => ensureVideoContentType(proxyRes),
   })(req, res, next);
 });
 
-/* ----------------- HTTP server ----------------- */
+/* HTTP */
 const server = app.listen(PORT, () => {
   console.log(`HTTP server running on port ${PORT}`);
 });
 
-/* ----------------- WebSocket /watchparty ----------------- */
+/* WebSocket /watchparty */
 const wss = new WebSocketServer({ server, path: '/watchparty' });
-
 const rooms = new Map(); // roomId -> { clients:Set<ws>, state:{ playing, time, updatedAt, src } }
 
 function getOrCreateRoom(roomId) {
@@ -89,7 +87,6 @@ function getOrCreateRoom(roomId) {
   }
   return rooms.get(roomId);
 }
-
 function broadcast(room, payload, except) {
   for (const c of room.clients) {
     if (c.readyState !== 1) continue;
@@ -97,7 +94,6 @@ function broadcast(room, payload, except) {
     try { c.send(JSON.stringify(payload)); } catch {}
   }
 }
-
 function applyAction(room, action) {
   const now = Date.now();
   if (action.type === 'setSource') {
@@ -120,7 +116,6 @@ function applyAction(room, action) {
     room.state.updatedAt = now;
   }
 }
-
 wss.on('connection', (ws, req) => {
   const params = new URLSearchParams(req.url.split('?')[1] || '');
   const roomId = params.get('room') || 'default';
@@ -137,7 +132,6 @@ wss.on('connection', (ws, req) => {
       broadcast(room, msg, null);
       return;
     }
-
     if (['play','pause','seek'].includes(msg.type)) {
       applyAction(room, msg);
       broadcast(room, msg, ws);
