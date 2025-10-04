@@ -4,233 +4,228 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Watch Party</title>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
-    :root{ --gap:12px; }
-    *{ box-sizing:border-box }
-    body{ font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; margin:0; padding:24px }
-    .wrap{ max-width:900px; margin:0 auto }
-    .row{ display:flex; gap:var(--gap); align-items:center; flex-wrap:wrap; margin:12px 0 }
-    input,button{ padding:8px 12px; border:1px solid #ccc; border-radius:10px }
-    button{ cursor:pointer }
-    input[type="url"], input[type="text"]{ min-width:260px }
-
-    .player-wrap{
-      --player-ratio: 16/9;   /* ratio par défaut */
-      --fit: contain;         /* contain = adapter ; cover = crop plein écran */
-      position: relative;
-      width:100%;
-      aspect-ratio: var(--player-ratio);
-      background:#000;
-      border-radius:12px;
-      overflow:hidden;
-      max-height:min(70svh,80vh);
-      box-shadow:0 2px 12px rgba(0,0,0,.08);
-    }
-    .player-wrap video{ width:100%; height:100%; object-fit:var(--fit); display:block; background:#000 }
-    .player-wrap:fullscreen{ max-height:100vh; aspect-ratio:auto }
-    .player-wrap:fullscreen video{ width:100%; height:100% }
-
-    @media (max-width:600px){
-      body{ padding:16px }
-      .row input, .row button{ flex:1 0 auto }
-    }
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px}
+    .wrap{max-width:900px;margin:0 auto}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
+    video{width:100%;max-height:70vh;background:#000;border-radius:12px}
+    input,button{padding:8px 12px;border:1px solid #ccc;border-radius:10px}
+    button{cursor:pointer}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Watch Party</h1>
 
+    <!-- Salle -->
     <div class="row">
-      <label for="roomInput">Salle :</label>
+      <span>Salle :</span>
       <input id="roomInput" type="text" placeholder="amis" />
       <button id="joinBtn">Créer/Rejoindre</button>
       <button id="copyBtn">Copier le lien d'invitation</button>
     </div>
 
+    <!-- Source commune -->
     <div class="row">
-      <input id="srcInput" type="url" placeholder="Colle .mp4 / .m3u8 / .ts (ou /proxy?u=… / /ts2m3u8?u=…)" style="flex:1 0 320px" />
+      <!-- Tu peux taper: /video-remote OU /proxy?u=http://... OU un https:// direct -->
+      <input id="srcInput" type="url" placeholder="/video-remote ou /proxy?u=http://..." style="min-width:420px" />
       <button id="setSrcBtn">Définir la vidéo pour tous</button>
     </div>
 
-    <div class="player-wrap" id="playerWrap">
-      <video id="player" controls preload="metadata" playsinline>
-        <source src="/video-remote" type="video/mp4" />
-      </video>
-    </div>
+    <video id="player" controls preload="metadata">
+      <!-- Par défaut: proxy fixe -->
+      <source src="/video-remote" type="video/mp4" />
+    </video>
 
     <div class="row">
       <input type="file" id="filePicker" accept="video/*" />
       <button id="syncBtn">Me recaler</button>
-      <button id="fitToggle">Plein écran (crop)</button>
-      <button id="fsBtn">Plein écran</button>
     </div>
   </div>
 
   <script>
-    const player     = document.getElementById('player');
-    const playerWrap = document.getElementById('playerWrap');
-    const roomInput  = document.getElementById('roomInput');
-    const joinBtn    = document.getElementById('joinBtn');
-    const copyBtn    = document.getElementById('copyBtn');
+    const player = document.getElementById('player');
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const copyBtn = document.getElementById('copyBtn');
     const filePicker = document.getElementById('filePicker');
-    const syncBtn    = document.getElementById('syncBtn');
-    const srcInput   = document.getElementById('srcInput');
-    const setSrcBtn  = document.getElementById('setSrcBtn');
-    const fitToggle  = document.getElementById('fitToggle');
-    const fsBtn      = document.getElementById('fsBtn');
+    const syncBtn = document.getElementById('syncBtn');
+    const srcInput = document.getElementById('srcInput');
+    const setSrcBtn = document.getElementById('setSrcBtn');
 
     const urlParams = new URLSearchParams(location.search);
     const initialRoom = urlParams.get('room') || 'amis';
     roomInput.value = initialRoom;
 
-    let ws = null, isRemoteUpdate = false, hls = null;
+    let ws = null;
+    let isRemoteUpdate = false;
 
-    function wsURL(room){ const proto = location.protocol === 'https:' ? 'wss' : 'ws'; return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`; }
-    function connect(room){
-      if (ws) try { ws.close(); } catch(_){}
+    function wsURL(room) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${location.host}/watchparty?room=${encodeURIComponent(room)}`;
+    }
+
+    function connect(room) {
+      if (ws) { try { ws.close(); } catch(_){} }
       ws = new WebSocket(wsURL(room));
-      ws.onmessage = async ev => {
-        let msg; try { msg = JSON.parse(ev.data||'{}'); } catch { return; }
-        if (msg.type === 'syncState' && msg.state) applySyncState(msg.state);
-        else if (msg.type === 'setSource') setPlayerSource(msg.src, false);
-        else if (msg.type === 'play')  { await setCurrentTime(msg.time||0); isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false; }
-        else if (msg.type === 'pause') { await setCurrentTime(msg.time||0); isRemoteUpdate = true; player.pause(); isRemoteUpdate = false; }
-        else if (msg.type === 'seek')  { await setCurrentTime(msg.time||0); }
+
+      ws.onopen  = () => console.log('WS open:', ws.url);
+      ws.onclose = () => console.log('WS closed');
+      ws.onerror = (e) => console.error('WS error', e);
+
+      ws.onmessage = async (ev) => {
+        let msg; try { msg = JSON.parse(ev.data || '{}'); } catch { return; }
+
+        if (msg.type === 'syncState' && msg.state) {
+          await applySync(msg.state);
+        } else if (msg.type === 'play') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
+        } else if (msg.type === 'pause') {
+          await setCurrentTime(msg.time || 0);
+          isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+        } else if (msg.type === 'seek') {
+          await setCurrentTime(msg.time || 0);
+        } else if (msg.type === 'setSource') {
+          if (msg.src) setPlayerSrc(msg.src);
+        }
       };
     }
 
-    function updateAspect(){ const vw = player.videoWidth||16, vh=player.videoHeight||9; playerWrap.style.setProperty('--player-ratio', vw/vh); }
-    player.addEventListener('loadedmetadata', updateAspect);
-    player.addEventListener('loadeddata',     updateAspect);
-
-    function currentFit(){ return (getComputedStyle(playerWrap).getPropertyValue('--fit').trim() || 'contain'); }
-    function applyFit(next){ playerWrap.style.setProperty('--fit', next); fitToggle.textContent = (next==='cover')?'Adapter (bords noirs)':'Plein écran (crop)'; }
-    applyFit('contain');
-    fitToggle.addEventListener('click', ()=> applyFit(currentFit()==='contain'?'cover':'contain'));
-
-    const enterFS = el => (el.requestFullscreen||el.webkitRequestFullscreen||el.msRequestFullscreen)?.call(el);
-    const exitFS  = () => (document.exitFullscreen||document.webkitExitFullscreen||document.msExitFullscreen)?.call(document);
-    fsBtn.addEventListener('click', ()=> document.fullscreenElement?exitFS():enterFS(playerWrap));
-    document.addEventListener('fullscreenchange', ()=> fsBtn.textContent = document.fullscreenElement?'Quitter plein écran':'Plein écran');
-
-    class ProxyLoader extends (window.Hls?Hls.DefaultConfig.loader:Function){
-      constructor(c){ super(c); }
-      load(ctx,cfg,cb){
-        const u = ctx.url||'';
-        if (u && !u.startsWith('/proxy?u=')) {
-          if (/^https?:\/\//i.test(u)) ctx.url = '/proxy?u=' + encodeURIComponent(u);
-        }
-        return super.load(ctx,cfg,cb);
+    async function setCurrentTime(t) {
+      if (Math.abs(player.currentTime - t) > 0.4) {
+        player.currentTime = t;
+        await new Promise(r => setTimeout(r, 0));
       }
     }
 
-    function destroyHls(){ if (hls) { try { hls.destroy(); } catch(_){} hls = null; } }
-
-    function normalizeSrc(input){
-      let s = (input||'').trim();
-      if (!s) return '';
-
-      // .ts -> wrapper HLS
-      if (/\.ts(\?|$)/i.test(s)) {
-        if (/^https?:\/\//i.test(s)) return '/ts2m3u8?u=' + encodeURIComponent(s);
-        if (s.startsWith('/proxy?u=')) return '/ts2m3u8?u=' + s.slice(9);
-        if (s.startsWith('/')) return '/ts2m3u8?u=' + encodeURIComponent(new URL(s, location.origin).toString());
-      }
-
-      // .m3u8 -> passer par le détecteur serveur /hls-avc
-      if (/\.m3u8(\?|$)/i.test(s)) {
-        if (/^https?:\/\//i.test(s)) return '/hls-avc?u=' + encodeURIComponent(s);
-        if (s.startsWith('/proxy?u=')) return '/hls-avc?u=' + s.slice(9);
-      }
-
-      // mp4 http -> proxy
-      if (/\.mp4(\?|$)/i.test(s) && /^http:\/\//i.test(s)) {
-        return '/proxy?u=' + encodeURIComponent(s);
-      }
-      return s;
+    function setPlayerSrc(src) {
+      console.log('Setting player src to:', src);
+      const wasPlaying = !player.paused;
+      player.pause();
+      player.removeAttribute('src');   // flush
+      player.load();
+      player.src = src;
+      player.load();
+      if (wasPlaying) player.play().catch(()=>{});
     }
 
-    function setPlayerSource(src, autoplay=false){
-      if (!src) return;
-      destroyHls();
+    async function applySync(state) {
+      if (state.src && player.currentSrc !== state.src) {
+        setPlayerSrc(state.src);
+      }
+      let target = state.time;
+      if (state.playing) {
+        const drift = (Date.now() - state.updatedAt) / 1000;
+        target += drift;
+      }
+      await setCurrentTime(target);
 
-      // HLS
-      if (/\.m3u8(\?|$)/i.test(src)) {
-        let source = src;
-        const m = /^\/proxy\?u=(.+)$/.exec(src);
-        if (m) { try { source = decodeURIComponent(m[1]); } catch { source = m[1]; } }
+      if (state.playing && player.paused) {
+        isRemoteUpdate = true; await player.play().catch(()=>{}); isRemoteUpdate = false;
+      }
+      if (!state.playing && !player.paused) {
+        isRemoteUpdate = true; player.pause(); isRemoteUpdate = false;
+      }
+    }
 
-        if (window.Hls && Hls.isSupported()) {
-          hls = new Hls({ enableWorker:true, loader: ProxyLoader });
-          hls.on(Hls.Events.MANIFEST_PARSED, ()=> { if (autoplay) player.play().catch(()=>{}); });
-          hls.on(Hls.Events.ERROR, (e,d)=>{ if (d.fatal && d.type==='mediaError') hls.recoverMediaError(); });
-          hls.loadSource(source);
-          hls.attachMedia(player);
-        } else {
-          player.src = src;
-          player.addEventListener('loadedmetadata', ()=> { if (autoplay) player.play().catch(()=>{}); }, { once:true });
+    // Normalise tout ce que l'utilisateur colle (relatif/absolu, encodé ou pas)
+    function normalizeSrc(input) {
+      input = (input || '').trim();
+      if (!input) return null;
+
+      try {
+        const asURL = new URL(input, location.origin);
+        // /proxy absolu/relatif → force encodage
+        if (asURL.origin === location.origin && asURL.pathname === '/proxy') {
+          const raw = asURL.searchParams.get('u');
+          if (!raw) return null;
+          return '/proxy?u=' + encodeURIComponent(raw);
         }
+        // /video-remote
+        if (asURL.origin === location.origin && asURL.pathname === '/video-remote') {
+          return '/video-remote';
+        }
+        // HTTPS externe → OK direct
+        if (asURL.protocol === 'https:') return asURL.toString();
+        // HTTP externe en HTTPS → wrap via /proxy
+        if (asURL.protocol === 'http:' && location.protocol === 'https:') {
+          return '/proxy?u=' + encodeURIComponent(asURL.toString());
+        }
+      } catch { /* pas une URL absolue */ }
+
+      // /proxy?u=... relatif
+      if (input.startsWith('/proxy')) {
+        const sp = new URLSearchParams(input.split('?')[1] || '');
+        const raw = sp.get('u');
+        if (!raw) return null;
+        try { return '/proxy?u=' + encodeURIComponent(decodeURIComponent(raw)); }
+        catch { return '/proxy?u=' + encodeURIComponent(raw); }
+      }
+
+      // Cas simple: /video-remote ou fichier/chemin relatif (episode1.mp4)
+      if (input === '/video-remote') return input;
+      if (!input.includes('://') && !input.startsWith('/proxy')) return input;
+
+      return null;
+    }
+
+    // Actions locales -> serveur
+    player.addEventListener('play',   () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play', time: player.currentTime })); });
+    player.addEventListener('pause',  () => { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time: player.currentTime })); });
+    player.addEventListener('seeking',() => { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time: player.currentTime })); });
+
+    // Définir la source commune (MAJ locale immédiate + broadcast)
+    setSrcBtn.addEventListener('click', () => {
+      const finalSrc = normalizeSrc(srcInput.value);
+      if (!finalSrc) {
+        alert("URL invalide. Exemples : /video-remote, /proxy?u=http://..., /proxy?u=http%3A%2F%2F..., https://...");
         return;
       }
-
-      // MP4 / autre
-      player.pause();
-      player.removeAttribute('src'); player.load();
-      player.src = src; player.load();
-      if (autoplay) player.play().catch(()=>{});
-    }
-
-    function currentSrc(){
-      try { const u = new URL(player.currentSrc || player.src); return u.pathname + u.search; }
-      catch { return player.currentSrc || player.src || ''; }
-    }
-    async function setCurrentTime(t){ if (Math.abs(player.currentTime - t) > 0.4){ player.currentTime = t; await new Promise(r=>setTimeout(r,0)); } }
-    async function applySyncState(state){
-      if (state.src && currentSrc() !== state.src) setPlayerSource(state.src);
-      let target = state.time||0; if (state.playing) target += (Date.now()-state.updatedAt)/1000;
-      await setCurrentTime(target);
-      if (state.playing && player.paused){ isRemoteUpdate=true; await player.play().catch(()=>{}); isRemoteUpdate=false; }
-      if (!state.playing && !player.paused){ isRemoteUpdate=true; player.pause(); isRemoteUpdate=false; }
-    }
-
-    player.addEventListener('play',   ()=> { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'play',  time:player.currentTime })); });
-    player.addEventListener('pause',  ()=> { if (!ws || isRemoteUpdate) return; ws.send(JSON.stringify({ type:'pause', time:player.currentTime })); });
-    player.addEventListener('seeking',()=> { if (!ws) return; ws.send(JSON.stringify({ type:'seek',  time:player.currentTime })); });
-
-    setSrcBtn.addEventListener('click', async ()=>{
-      const raw = srcInput.value.trim();
-      const normalized = normalizeSrc(raw);
-      if (!normalized) return;
-
-      // si on passe par /hls-avc et qu'il n'y a PAS d’AVC, le serveur renverra 406
-      if (normalized.startsWith('/hls-avc')) {
-        const head = await fetch(normalized, { method:'HEAD' });
-        if (head.status === 406) {
-          alert("Ce flux ne propose aucune variante H.264 (AVC). Essayez Safari ou cherchez une source AVC.");
-          return;
-        }
+      setPlayerSrc(finalSrc); // local
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'setSource', src: finalSrc }));
       }
-      setPlayerSource(normalized);
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'setSource', src: normalized }));
+      console.log('Source définie pour tous →', finalSrc);
     });
 
-    joinBtn.addEventListener('click', ()=>{
-      const room = (roomInput.value||'amis').trim();
-      const nextURL = new URL(location.href); nextURL.searchParams.set('room', room);
-      history.replaceState(null,'',nextURL.toString()); connect(room);
+    // Rejoindre une salle
+    joinBtn.addEventListener('click', () => {
+      const room = (roomInput.value || 'amis').trim();
+      const nextURL = new URL(location.href);
+      nextURL.searchParams.set('room', room);
+      history.replaceState(null, '', nextURL.toString());
+      connect(room);
     });
-    copyBtn.addEventListener('click', async ()=>{
-      const room = (roomInput.value||'amis').trim();
-      const link = new URL(location.href); link.searchParams.set('room', room);
+
+    // Copier le lien
+    copyBtn.addEventListener('click', async () => {
+      const room = (roomInput.value || 'amis').trim();
+      const link = new URL(location.href);
+      link.searchParams.set('room', room);
       await navigator.clipboard.writeText(link.toString());
-      copyBtn.textContent = 'Lien copié ✓'; setTimeout(()=> copyBtn.textContent='Copier le lien d\'invitation',1600);
+      copyBtn.textContent = 'Lien copié ✓';
+      setTimeout(() => (copyBtn.textContent = "Copier le lien d'invitation"), 1600);
     });
-    syncBtn.addEventListener('click', ()=> { if (ws && ws.readyState===1) ws.send(JSON.stringify({ type:'syncRequest' })); });
 
-    filePicker.addEventListener('change', ()=>{
+    // Re-sync manuel
+    syncBtn.addEventListener('click', () => {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'syncRequest' }));
+    });
+
+    // Fichier local (non partagé)
+    filePicker.addEventListener('change', () => {
       const f = filePicker.files?.[0];
-      if (f){ const url = URL.createObjectURL(f); setPlayerSource(url, true); }
+      if (f) {
+        const url = URL.createObjectURL(f);
+        setPlayerSrc(url);
+        console.log('Local file:', f.name);
+      }
+    });
+
+    // Log d'erreur vidéo (utile si ça ne lit pas)
+    player.addEventListener('error', () => {
+      console.error('Video error:', player.error, 'currentSrc=', player.currentSrc);
     });
 
     connect(initialRoom);
